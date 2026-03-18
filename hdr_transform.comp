@@ -1,0 +1,33 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0, rgba8) uniform readonly image2D inputImage;
+layout(binding = 1, rgba16f) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    float max_luminance;
+    float full_frame_luminance;
+    float saturation;
+    uint width;
+    uint height;
+} push;
+
+vec3 srgb_to_linear(vec3 srgb) {
+    return pow(srgb, vec3(2.2));
+}
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= push.width || pos.y >= push.height) return;
+
+    vec4 color = imageLoad(inputImage, pos);
+    vec3 linear = srgb_to_linear(color.rgb);
+    
+    // Simple HDR transform
+    linear *= (push.max_luminance / 100.0);
+    
+    // Saturation (simple)
+    float luma = dot(linear, vec3(0.2126, 0.7152, 0.0722));
+    linear = mix(vec3(luma), linear, push.saturation);
+
+    imageStore(outputImage, pos, vec4(linear, color.a));
+}

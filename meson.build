@@ -9,7 +9,6 @@ manifest_path = meson.project_source_root() / 'Cargo.toml'
 shared_lib = custom_target(
   'vk_layer_hdr_tensor_so',
   build_by_default: true,
-  build_always_stale: true,
   output: 'libVkLayer_hdr_tensor.so',
   console: true,
   command: [
