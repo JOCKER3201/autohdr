@@ -1,0 +1,11 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_MY_hdr_tensor",
+        "type": "GLOBAL",
+        "library_path": "@LAYER_PATH@",
+        "api_version": "1.3.268",
+        "implementation_version": "1",
+        "description": "Wymusza tryb HDR i wykonuje SDR->HDR za pomoca Tensor Cores i sieci neuronowych."
+    }
+}
