@@ -42,11 +42,11 @@ configure_file(
   output: 'VkLayer_hdr_tensor_install.json',
   configuration: conf_data_install,
   install: true,
-  install_dir: get_option('datadir') / 'vulkan' / 'explicit_layer.d',
+  install_dir: get_option('datadir') / 'vulkan' / 'implicit_layer.d',
   install_tag: 'runtime'
 )
 
 # Zmieniamy nazwę zainstalowanego pliku na właściwą
 meson.add_install_script('sh', '-c', 'mv "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor_install.json" "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor.json"',
-  '--', get_option('datadir') / 'vulkan' / 'explicit_layer.d'
+  '--', get_option('datadir') / 'vulkan' / 'implicit_layer.d'
 )
