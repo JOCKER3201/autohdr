@@ -2,6 +2,12 @@ Hello!
 
 This is my project RTX hdr on linux
 
+NOTE: I wrote this project using gemini cli, but actually I didn't write anything in the code because I only issued commands,
+this code was written for me because I needed autohdr for some games,
+I don't want AI slop to become popular, so if you end up here, don't spread it around,
+Besides, I don't know if AI hasn't hidden some crap here, so be careful,
+you use at your own risk.
+
 1. env
 
    ⚙️ Logika Działania
