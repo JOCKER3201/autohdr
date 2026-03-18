@@ -8,6 +8,7 @@ layout(push_constant) uniform PushConstants {
     float max_lum;
     float mid_lum;
     float sat;
+    float vibrance;
     uint width;
     uint height;
 } pc;
@@ -49,7 +50,18 @@ void main() {
     
     // 3. Obliczanie jasności i nasycenie
     float luma = dot(color, vec3(0.2627, 0.6780, 0.0593)); // Rec.2020 luma
-    color = mix(vec3(luma), color, pc.sat);
+    
+    // Aggressive & Perceptually correct vibrance
+    float max_c = max(color.r, max(color.g, color.b));
+    float min_c = min(color.r, min(color.g, color.b));
+    float sat_val = (max_c - min_c) / (max(max_c, 0.0001));
+
+    // Smoothstep-based weight to boost low-saturation colors significantly more
+    float vibrance_weight = 1.0 - smoothstep(0.0, 1.0, sat_val);
+    float vibrance_boost = pc.vibrance * vibrance_weight * 2.0; // Aggressive boost
+
+    color = mix(vec3(luma), color, pc.sat * (1.0 + vibrance_boost));
+    color = max(color, vec3(0.0)); // Ensure final color is clamped to non-negative
     
     // 4. Skalowanie jasności (pow^3 dla świateł, proporcjonalne dla zachowania koloru)
     float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
