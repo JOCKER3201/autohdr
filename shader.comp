@@ -1,0 +1,53 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputTexture;
+layout(set = 0, binding = 1, rgb10_a2) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    float max_lum;
+    float mid_lum;
+    float sat;
+    uint width;
+    uint height;
+} pc;
+
+vec3 linear_to_pq(vec3 c) {
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 4096.0 * 32.0;
+    const float c3 = 2392.0 / 4096.0 * 32.0;
+    vec3 cp = pow(max(c, vec3(0.0)), vec3(m1));
+    return pow((c1 + c2 * cp) / (1.0 + c3 * cp), vec3(m2));
+}
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= pc.width || pos.y >= pc.height) return;
+
+    vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
+    vec4 sdr = texture(inputTexture, uv);
+    vec3 color = sdr.rgb;
+    
+    // 1. Obliczamy jasność (luminancję) piksela
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    
+    // 2. Nasycenie (na surowym kolorze)
+    color = mix(vec3(luma), color, pc.sat);
+    
+    // 3. Skalowanie jasności krzywą pow^3 (tylko dla luminancji!)
+    // To zapobiega żółknięciu bieli (Hue Shift)
+    float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
+    
+    // 4. Skalujemy RGB proporcjonalnie do nowej luminancji
+    vec3 hdr_linear;
+    if (luma > 0.0001) {
+        hdr_linear = color * (target_luma / luma);
+    } else {
+        hdr_linear = color * pc.mid_lum; 
+    }
+    
+    // 5. PQ Encoding
+    imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr.a));
+}
