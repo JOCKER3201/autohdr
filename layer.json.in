@@ -4,9 +4,9 @@
         "name": "VK_LAYER_MY_hdr_tensor",
         "type": "GLOBAL",
         "library_path": "@LAYER_PATH@",
-        "api_version": "1.3.268",
+        "api_version": "1.4.0",
         "implementation_version": "1",
-        "description": "Wymusza tryb HDR i wykonuje SDR->HDR za pomoca Tensor Cores i sieci neuronowych.",
+        "description": "Wymusza tryb HDR i wykonuje SDR->HDR za pomoca Tensor Cores i sieci neuronowych (Vulkan 1.4).",
         "enable_environment": {
             "AUTOHDR_ENABLE": "1"
         },

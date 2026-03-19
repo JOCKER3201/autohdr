@@ -1,4 +1,8 @@
 #version 450
+#extension GL_NV_cooperative_matrix : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+
+// Powrót do 8x8 dla lepszej kompatybilności z dispatch w Rust
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 0) uniform sampler2D inputTexture;
@@ -11,14 +15,14 @@ layout(push_constant) uniform PushConstants {
     float vibrance;
     uint width;
     uint height;
+    uint use_tensor;
+    uint pad; // Dodano pad, aby pasowało do struktury w Rust
 } pc;
 
-// Macierz konwersji SDR (Rec.709) -> HDR (Rec.2020)
-// Zapobiega "wypranym" kolorom w trybie HDR
-const mat3 Rec709_to_2020 = mat3(
-    0.6274, 0.0691, 0.0164,
-    0.3293, 0.9195, 0.0880,
-    0.0433, 0.0114, 0.8956
+const f16mat3 Rec709_to_2020_f16 = f16mat3(
+    0.6274hf, 0.0691hf, 0.0164hf,
+    0.3293hf, 0.9195hf, 0.0880hf,
+    0.0433hf, 0.0114hf, 0.8956hf
 );
 
 vec3 srgb_to_linear(vec3 c) {
@@ -42,37 +46,25 @@ void main() {
     vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
     vec4 sdr_sample = texture(inputTexture, uv);
     
-    // 1. SDR -> Liniowy
-    vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
-    
-    // 2. Rozszerzenie do Rec.2020 (Ożywia kolory na monitorze HDR)
-    color = Rec709_to_2020 * color;
-    
-    // 3. Obliczanie jasności i nasycenie
-    float luma = dot(color, vec3(0.2627, 0.6780, 0.0593)); // Rec.2020 luma
-    
-    // Aggressive & Perceptually correct vibrance
-    float max_c = max(color.r, max(color.g, color.b));
-    float min_c = min(color.r, min(color.g, color.b));
-    float sat_val = (max_c - min_c) / (max(max_c, 0.0001));
+    if (pc.use_tensor == 1) {
+        f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
+        color = Rec709_to_2020_f16 * color;
+        
+        float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
+        float16_t target_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
+        
+        f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * float16_t(pc.mid_lum);
+        
+        float noise = fract(sin(dot(pos.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        hdr_linear += float16_t((noise - 0.5) * (float(target_luma) / 1023.0));
 
-    // Smoothstep-based weight to boost low-saturation colors significantly more
-    float vibrance_weight = 1.0 - smoothstep(0.0, 1.0, sat_val);
-    float vibrance_boost = pc.vibrance * vibrance_weight * 2.0; // Aggressive boost
-
-    color = mix(vec3(luma), color, pc.sat * (1.0 + vibrance_boost));
-    color = max(color, vec3(0.0)); // Ensure final color is clamped to non-negative
-    
-    // 4. Skalowanie jasności (pow^3 dla świateł, proporcjonalne dla zachowania koloru)
-    float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
-    
-    vec3 hdr_linear;
-    if (luma > 0.0001) {
-        hdr_linear = color * (target_luma / luma);
+        imageStore(outputImage, pos, vec4(linear_to_pq(vec3(hdr_linear) / 10000.0), sdr_sample.a));
     } else {
-        hdr_linear = color * pc.mid_lum;
+        vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
+        color = mat3(Rec709_to_2020_f16) * color;
+        float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+        float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
+        vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * pc.mid_lum;
+        imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
     }
-    
-    // 5. PQ Encoding
-    imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
 }

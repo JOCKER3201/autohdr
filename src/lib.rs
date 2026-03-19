@@ -38,10 +38,11 @@ impl HdrConfig {
 }
 
 #[repr(C)] #[derive(Clone, Copy)]
-struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, pad: [u32; 2] }
+struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, pad: [u32; 1] }
 
 pub struct DeviceContext {
     pub pd: vk::PhysicalDevice, pub inst: vk::Instance, pub gdpa: vk::PFN_vkGetDeviceProcAddr, pub gipa: vk::PFN_vkGetInstanceProcAddr,
+    pub is_nvidia: bool, pub has_tensor: bool,
     pub create_image: Option<vk::PFN_vkCreateImage>, pub get_image_mem_req: Option<vk::PFN_vkGetImageMemoryRequirements>,
     pub allocate_mem: Option<vk::PFN_vkAllocateMemory>, pub bind_image_mem: Option<vk::PFN_vkBindImageMemory>,
     pub create_image_view: Option<vk::PFN_vkCreateImageView>, pub create_shader_module: Option<vk::PFN_vkCreateShaderModule>,
@@ -84,6 +85,7 @@ pub struct SwapchainState {
     pub sampler: vk::Sampler,
     pub present_semaphores: Vec<vk::Semaphore>,
     pub bypass: bool,
+    pub has_tensor: bool,
 }
 
 #[no_mangle] pub unsafe extern "system" fn vkNegotiateLoaderLayerInterfaceVersion(p_vs: *mut NegotiateLayerInterface) -> vk::Result { (*p_vs).pfn_get_instance_proc_addr = Some(hook_get_instance_proc_addr); (*p_vs).pfn_get_device_proc_addr = Some(hook_get_device_proc_addr); vk::Result::SUCCESS }
@@ -308,6 +310,67 @@ unsafe extern "system" fn hook_create_device(pd: vk::PhysicalDevice, p_ci: *cons
             let next_gdpa = (*(*li).p_layer_info).pfn_next_get_device_proc_addr;
             (*li).p_layer_info = (*(*li).p_layer_info).p_next;
             let inst = PHYSICAL_DEVICE_TO_INSTANCE.read().unwrap().get(&pd).copied().or_else(|| *GLOBAL_INSTANCE.read().unwrap()).unwrap_or(vk::Instance::null());
+            
+            let mut props = vk::PhysicalDeviceProperties::default();
+            if let Some(f_props) = next_gipa(inst, b"vkGetPhysicalDeviceProperties\0".as_ptr() as *const c_char) {
+                let pfn_props: vk::PFN_vkGetPhysicalDeviceProperties = std::mem::transmute(f_props);
+                (pfn_props)(pd, &mut props);
+            }
+            let is_nvidia = props.vendor_id == 0x10DE;
+            let mut has_tensor = false;
+            let mut tensor_ext_to_enable = Vec::new();
+
+            if is_nvidia {
+                let mut ext_count = 0;
+                if let Some(f_ext) = next_gipa(inst, b"vkEnumerateDeviceExtensionProperties\0".as_ptr() as *const c_char) {
+                    let pfn_ext: vk::PFN_vkEnumerateDeviceExtensionProperties = std::mem::transmute(f_ext);
+                    let _ = (pfn_ext)(pd, std::ptr::null(), &mut ext_count, std::ptr::null_mut());
+                    let mut extensions = vec![vk::ExtensionProperties::default(); ext_count as usize];
+                    let _ = (pfn_ext)(pd, std::ptr::null(), &mut ext_count, extensions.as_mut_ptr());
+                    
+                    let available_exts: Vec<_> = extensions.iter().map(|e| {
+                        CStr::from_ptr(e.extension_name.as_ptr()).to_str().unwrap_or("")
+                    }).collect();
+
+                    if available_exts.contains(&"VK_NV_cooperative_matrix") && available_exts.contains(&"VK_KHR_shader_float16_int8") {
+                        has_tensor = true;
+                        tensor_ext_to_enable.push(b"VK_NV_cooperative_matrix\0".as_ptr() as *const c_char);
+                        tensor_ext_to_enable.push(b"VK_KHR_shader_float16_int8\0".as_ptr() as *const c_char);
+                        tensor_ext_to_enable.push(b"VK_KHR_storage_buffer_storage_class\0".as_ptr() as *const c_char);
+                    }
+                }
+            }
+
+            if has_tensor {
+                for &ext in &tensor_ext_to_enable {
+                    if !exts.iter().any(|&e| CStr::from_ptr(e) == CStr::from_ptr(ext)) {
+                        exts.push(ext);
+                    }
+                }
+                ci.enabled_extension_count = exts.len() as u32;
+                ci.pp_enabled_extension_names = exts.as_ptr();
+            }
+
+            let mut feat_tensor = vk::PhysicalDeviceCooperativeMatrixFeaturesNV {
+                s_type: vk::StructureType::PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV,
+                p_next: ci.p_next as *mut _,
+                cooperative_matrix: vk::TRUE,
+                cooperative_matrix_robust_buffer_access: vk::FALSE,
+            };
+            let mut feat_f16 = vk::PhysicalDeviceShaderFloat16Int8Features {
+                s_type: vk::StructureType::PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+                p_next: if has_tensor { &mut feat_tensor as *mut _ as *mut _ } else { ci.p_next as *mut _ },
+                shader_float16: vk::TRUE,
+                shader_int8: vk::FALSE,
+            };
+            if has_tensor {
+                ci.p_next = &mut feat_f16 as *mut _ as *mut _;
+            }
+
+            if is_nvidia {
+                eprintln!("[Vulkan HDR Layer] Wykryto NVIDIA GPU. Tensor Cores: {}", if has_tensor { "TAK (Aktywowano)" } else { "NIE" });
+            }
+
             if let Some(f) = next_gipa(inst, b"vkCreateDevice\0".as_ptr() as *const c_char) {
                 let res = (std::mem::transmute::<_, vk::PFN_vkCreateDevice>(f))(pd, &ci, p_al, p_dev);
                 if res == vk::Result::SUCCESS {
@@ -315,6 +378,7 @@ unsafe extern "system" fn hook_create_device(pd: vk::PhysicalDevice, p_ci: *cons
                     let f_dev = |n: &[u8]| next_gdpa(*p_dev, n.as_ptr() as *const c_char).or_else(|| next_gipa(inst, n.as_ptr() as *const c_char));
                     DEVICE_CONTEXTS.write().unwrap().insert(*p_dev, DeviceContext {
                         pd, inst, gdpa: next_gdpa, gipa: next_gipa,
+                        is_nvidia, has_tensor,
                         create_image: f_dev(b"vkCreateImage\0").map(|p| std::mem::transmute(p)),
                         get_image_mem_req: f_dev(b"vkGetImageMemoryRequirements\0").map(|p| std::mem::transmute(p)),
                         allocate_mem: f_dev(b"vkAllocateMemory\0").map(|p| std::mem::transmute(p)),
@@ -414,7 +478,8 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             real_images: Vec::new(), pipe: vk::Pipeline::null(), pipe_layout: vk::PipelineLayout::null(), 
             desc_layout: vk::DescriptorSetLayout::null(), desc_pool: vk::DescriptorPool::null(), 
             desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), 
-            sampler: vk::Sampler::null(), present_semaphores: Vec::new(), bypass: true 
+            sampler: vk::Sampler::null(), present_semaphores: Vec::new(), bypass: true,
+            has_tensor: c.has_tensor
         });
         return res;
     }
@@ -432,7 +497,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             let dsm: vk::PFN_vkDestroyShaderModule = std::mem::transmute(f);
             (dsm)(dev, sm, std::ptr::null());
         }
-        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false });
+        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, has_tensor: c.has_tensor });
     }
     res
 }
@@ -591,7 +656,8 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 vibrance: HDR_CONFIG.vibrance,
                                 width: st.width, 
                                 height: st.height, 
-                                pad: [0; 2] 
+                                use_tensor: if st.has_tensor { 1 } else { 0 },
+                                pad: [0; 1] 
                             } as *const _ as *const _);
                             (cd)(cb, (st.width + 7) / 8, (st.height + 7) / 8, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
