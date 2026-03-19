@@ -2,8 +2,9 @@
 #extension GL_NV_cooperative_matrix : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 
-// Powrót do 8x8 dla lepszej kompatybilności z dispatch w Rust
-layout(local_size_x = 8, local_size_y = 8) in;
+// Grupa 32 wątków (Warp) obsługuje kafel 16x16 (256 pikseli)
+// Każdy wątek przetwarza 8 pikseli (32 * 8 = 256)
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D inputTexture;
 layout(set = 0, binding = 1, rgb10_a2) uniform writeonly image2D outputImage;
@@ -16,7 +17,7 @@ layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
     uint use_tensor;
-    uint pad; // Dodano pad, aby pasowało do struktury w Rust
+    uint pad;
 } pc;
 
 const f16mat3 Rec709_to_2020_f16 = f16mat3(
@@ -40,31 +41,43 @@ vec3 linear_to_pq(vec3 c) {
 }
 
 void main() {
-    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    if (pos.x >= pc.width || pos.y >= pc.height) return;
+    uint idx = gl_LocalInvocationID.x;
+    ivec2 tile_origin = ivec2(gl_WorkGroupID.xy) * 16;
 
-    vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
-    vec4 sdr_sample = texture(inputTexture, uv);
-    
-    if (pc.use_tensor == 1) {
-        f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
-        color = Rec709_to_2020_f16 * color;
+    // Przetwarzamy kafel 16x16 (każdy z 32 wątków robi 8 pikseli w pionie)
+    for (int i = 0; i < 8; ++i) {
+        // Obliczamy pozycję: x (0..15), y (0..7 + 0 lub 8)
+        ivec2 pos = tile_origin + ivec2(idx % 16, (idx / 16) * 8 + i);
         
-        float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
-        float16_t target_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
-        
-        f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * float16_t(pc.mid_lum);
-        
-        float noise = fract(sin(dot(pos.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        hdr_linear += float16_t((noise - 0.5) * (float(target_luma) / 1023.0));
+        if (pos.x >= pc.width || pos.y >= pc.height) continue;
 
-        imageStore(outputImage, pos, vec4(linear_to_pq(vec3(hdr_linear) / 10000.0), sdr_sample.a));
-    } else {
-        vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
-        color = mat3(Rec709_to_2020_f16) * color;
-        float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
-        float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
-        vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * pc.mid_lum;
-        imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
+        vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
+        vec4 sdr_sample = texture(inputTexture, uv);
+
+        if (pc.use_tensor == 1) {
+            // Ścieżka optymalizowana (FP16 + Tensor-ready math)
+            f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
+            color = Rec709_to_2020_f16 * color;
+            
+            float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
+            float16_t target_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
+            
+            f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * float16_t(pc.mid_lum);
+            
+            // Szybki dithering macierzowy
+            const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
+            float d = dither[(pos.x % 2) + (pos.y % 2) * 2];
+            hdr_linear += float16_t((d - 0.5) * (float(target_luma) / 1023.0));
+
+            imageStore(outputImage, pos, vec4(linear_to_pq(vec3(hdr_linear) / 10000.0), sdr_sample.a));
+        } else {
+            // Ścieżka standardowa (FP32)
+            vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
+            color = mat3(Rec709_to_2020_f16) * color;
+            float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+            float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
+            vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * pc.mid_lum;
+            imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
+        }
     }
 }
