@@ -25,20 +25,21 @@ lazy_static::lazy_static! {
     static ref HDR_CONFIG: HdrConfig = HdrConfig::from_env();
 }
 
-struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32 }
+struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, pub intensity: f32 }
 impl HdrConfig {
     fn from_env() -> Self {
         let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1000.0);
         let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0);
         let sat = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={}", max_lum, mid_lum, sat, vibrance);
-        Self { max_lum, mid_lum, sat, vibrance }
+        let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={} Int={}", max_lum, mid_lum, sat, vibrance, intensity);
+        Self { max_lum, mid_lum, sat, vibrance, intensity }
     }
 }
 
 #[repr(C)] #[derive(Clone, Copy)]
-struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, pad: [u32; 1] }
+struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, intensity: f32 }
 
 pub struct DeviceContext {
     pub pd: vk::PhysicalDevice, pub inst: vk::Instance, pub gdpa: vk::PFN_vkGetDeviceProcAddr, pub gipa: vk::PFN_vkGetInstanceProcAddr,
@@ -657,9 +658,8 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 width: st.width, 
                                 height: st.height, 
                                 use_tensor: if st.has_tensor { 1 } else { 0 },
-                                pad: [0; 1] 
-                            } as *const _ as *const _);
-                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
+                                intensity: HDR_CONFIG.intensity
+                            } as *const _ as *const _);                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
                             let region = vk::ImageCopy { src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, src_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 } };
                             (cci)(cb, st.work_images[ii], vk::ImageLayout::TRANSFER_SRC_OPTIMAL, st.real_images[ii], vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1, &region);

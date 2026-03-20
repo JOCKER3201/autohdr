@@ -17,7 +17,7 @@ layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
     uint use_tensor;
-    uint pad;
+    float intensity;
 } pc;
 
 const f16mat3 Rec709_to_2020_f16 = f16mat3(
@@ -60,9 +60,11 @@ void main() {
             color = Rec709_to_2020_f16 * color;
             
             float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
-            float16_t target_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
+            float16_t sdr_luma = luma * 100.0hf;
+            float16_t hdr_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
+            float16_t target_luma = mix(sdr_luma, hdr_luma, float16_t(pc.intensity));
             
-            f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * float16_t(pc.mid_lum);
+            f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * mix(100.0hf, float16_t(pc.mid_lum), float16_t(pc.intensity));
             
             // Szybki dithering macierzowy
             const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
@@ -75,8 +77,10 @@ void main() {
             vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
             color = mat3(Rec709_to_2020_f16) * color;
             float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
-            float target_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
-            vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * pc.mid_lum;
+            float sdr_luma = luma * 100.0;
+            float hdr_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
+            float target_luma = mix(sdr_luma, hdr_luma, pc.intensity);
+            vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_lum, pc.intensity);
             imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
         }
     }
