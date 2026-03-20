@@ -41,55 +41,67 @@ vec3 linear_to_pq(vec3 c) {
     return pow((c1 + c2 * cp) / (1.0 + c3 * cp), vec3(m2));
 }
 
+// Vibrance function
+vec3 apply_vibrance(vec3 color, float vibrance) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float max_color = max(color.r, max(color.g, color.b));
+    float min_color = min(color.r, min(color.g, color.b));
+    float sat = max_color - min_color;
+    return mix(vec3(luma), color, 1.0 + vibrance * (1.0 - sat));
+}
+
+f16vec3 apply_vibrance_f16(f16vec3 color, float16_t vibrance) {
+    float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
+    float16_t max_color = max(color.r, max(color.g, color.b));
+    float16_t min_color = min(color.r, min(color.g, color.b));
+    float16_t sat = max_color - min_color;
+    return mix(f16vec3(luma), color, 1.0hf + vibrance * (1.0hf - sat));
+}
+
 void main() {
     uint idx = gl_LocalInvocationID.x;
     ivec2 tile_origin = ivec2(gl_WorkGroupID.xy) * 16;
 
-    // Przetwarzamy kafel 16x16 (każdy z 32 wątków robi 8 pikseli w pionie)
     for (int i = 0; i < 8; ++i) {
-        // Obliczamy pozycję: x (0..15), y (0..7 + 0 lub 8)
         ivec2 pos = tile_origin + ivec2(idx % 16, (idx / 16) * 8 + i);
-        
         if (pos.x >= pc.width || pos.y >= pc.height) continue;
 
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
         vec4 sdr_sample = texture(inputTexture, uv);
 
+        float vib_val = pc.vibrance + 0.5;
+
         if (pc.use_tensor == 1) {
-            // Ścieżka optymalizowana (FP16 + Tensor-ready math)
             f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
             color = Rec709_to_2020_f16 * color;
             
-            float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
+            // Apply vibrance (0.0 input = 0.5 internal)
+            color = apply_vibrance_f16(color, float16_t(vib_val));
             
-            // Black Level Offset (tylko najciemniejsze obszary)
+            float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
             float16_t black_weight = pow(max(1.0hf - luma, 0.0hf), 64.0hf);
             luma = max(0.0hf, luma + float16_t(pc.black_level) * black_weight * 0.01hf);
 
-            float16_t sdr_luma = luma * 100.0hf;
-            float16_t hdr_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
-            float16_t target_luma = mix(sdr_luma, hdr_luma, float16_t(pc.intensity));
-            
+            float16_t target_luma = mix(luma * 100.0hf, luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum), float16_t(pc.intensity));
             f16vec3 hdr_linear = (luma > 0.0001hf) ? color * (target_luma / luma) : color * mix(100.0hf, float16_t(pc.mid_lum), float16_t(pc.intensity));
             
-            // Szybki dithering macierzowy
             const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
             float d = dither[(pos.x % 2) + (pos.y % 2) * 2];
             hdr_linear += float16_t((d - 0.5) * (float(target_luma) / 1023.0));
 
             imageStore(outputImage, pos, vec4(linear_to_pq(vec3(hdr_linear) / 10000.0), sdr_sample.a));
         } else {
-            // Ścieżka standardowa (FP32)
             vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
             color = mat3(Rec709_to_2020_f16) * color;
-            float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
             
+            // Apply vibrance (0.0 input = 0.5 internal)
+            color = apply_vibrance(color, vib_val);
+
+            float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
             float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
             luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
 
-            float sdr_luma = luma * 100.0;
-            float hdr_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
-            float target_luma = mix(sdr_luma, hdr_luma, pc.intensity);
+            float target_luma = mix(luma * 100.0, luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum), pc.intensity);
             vec3 hdr_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_lum, pc.intensity);
             imageStore(outputImage, pos, vec4(linear_to_pq(hdr_linear / 10000.0), sdr_sample.a));
         }

@@ -29,9 +29,9 @@ struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibranc
 impl HdrConfig {
     fn from_env() -> Self {
         let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1000.0);
-        let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0);
+        let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(400.0);
         let sat = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={} Int={} Black={}", max_lum, mid_lum, sat, vibrance, intensity, black_level);
