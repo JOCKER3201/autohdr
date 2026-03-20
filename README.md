@@ -45,3 +45,11 @@ you use at your own risk.
    * AUTOHDR_SATURATION
        * Co robi: Klasyczne, liniowe nasycenie.
        * Opis: Mnoży nasycenie każdego piksela o tę samą wartość. Zwykle zaleca się pozostawienie tej wartości na 1.0 i korzystanie z AUTOHDR_VIBRANCE dla lepszego efektu wizualnego.
+
+   * AUTOHDR_INTENSITY
+       * Co robi: Kontroluje intensywność całego efektu HDR.
+       * Opis: Pozwala na płynne przejście między obrazem SDR a pełnym HDR (0.0 - obraz SDR, 1.0 - pełny efekt). Domyślnie: 1.0.
+
+   * AUTOHDR_BLACK_LEVEL
+       * Co robi: Reguluje poziom czerni (tylko najciemniejsze obszary).
+       * Opis: Wartości dodatnie rozjaśniają najgłębszą czerń, wartości ujemne ją pogłębiają. Nie wpływa na średnie tony ani światła. Domyślnie: 0.0.

@@ -18,6 +18,7 @@ layout(push_constant) uniform PushConstants {
     uint height;
     uint use_tensor;
     float intensity;
+    float black_level;
 } pc;
 
 const f16mat3 Rec709_to_2020_f16 = f16mat3(
@@ -60,6 +61,11 @@ void main() {
             color = Rec709_to_2020_f16 * color;
             
             float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
+            
+            // Black Level Offset (tylko najciemniejsze obszary)
+            float16_t black_weight = pow(max(1.0hf - luma, 0.0hf), 64.0hf);
+            luma = max(0.0hf, luma + float16_t(pc.black_level) * black_weight * 0.01hf);
+
             float16_t sdr_luma = luma * 100.0hf;
             float16_t hdr_luma = luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum);
             float16_t target_luma = mix(sdr_luma, hdr_luma, float16_t(pc.intensity));
@@ -77,6 +83,10 @@ void main() {
             vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
             color = mat3(Rec709_to_2020_f16) * color;
             float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+            
+            float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
+            luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
+
             float sdr_luma = luma * 100.0;
             float hdr_luma = luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum);
             float target_luma = mix(sdr_luma, hdr_luma, pc.intensity);
