@@ -19,6 +19,7 @@ layout(push_constant) uniform PushConstants {
     uint use_tensor;
     float intensity;
     float black_level;
+    float sdr_gain;
 } pc;
 
 const f16mat3 Rec709_to_2020_f16 = f16mat3(
@@ -73,6 +74,7 @@ void main() {
 
         if (pc.use_tensor == 1) {
             f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
+            color *= float16_t(pc.sdr_gain);
             color = Rec709_to_2020_f16 * color;
             
             // Apply vibrance
@@ -92,6 +94,7 @@ void main() {
             imageStore(outputImage, pos, vec4(linear_to_pq(vec3(hdr_linear) / 10000.0), sdr_sample.a));
         } else {
             vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
+            color *= pc.sdr_gain;
             color = mat3(Rec709_to_2020_f16) * color;
             
             // Apply vibrance

@@ -53,3 +53,7 @@ you use at your own risk.
    * AUTOHDR_BLACK_LEVEL
        * Co robi: Reguluje poziom czerni (tylko najciemniejsze obszary).
        * Opis: Wartości dodatnie rozjaśniają najgłębszą czerń, wartości ujemne ją pogłębiają. Nie wpływa na średnie tony ani światła. Domyślnie: 0.0.
+
+   * AUTOHDR_SDR_BRIGHTNESS
+       * Co robi: Jasność treści SDR w nitach.
+       * Opis: Pozwala określić jasność bazową obrazu z gry. Standardowo SDR jest masterowane dla 100 nitów (domyślnie). Zwiększenie tej wartości (np. do 200) rozjaśnia całą grę przed transformacją na HDR. Pomaga, gdy gra wydaje się zbyt ciemna. Domyślnie: 100.0.

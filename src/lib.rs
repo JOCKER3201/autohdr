@@ -25,7 +25,7 @@ lazy_static::lazy_static! {
     static ref HDR_CONFIG: HdrConfig = HdrConfig::from_env();
 }
 
-struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, pub intensity: f32, pub black_level: f32 }
+struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, pub intensity: f32, pub black_level: f32, pub sdr_gain: f32 }
 impl HdrConfig {
     fn from_env() -> Self {
         let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1000.0);
@@ -34,13 +34,15 @@ impl HdrConfig {
         let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={} Int={} Black={}", max_lum, mid_lum, sat, vibrance, intensity, black_level);
-        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level }
+        let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).unwrap_or(100.0);
+        let sdr_gain = sdr_brightness / 100.0;
+        eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={}", max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness);
+        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain }
     }
 }
 
 #[repr(C)] #[derive(Clone, Copy)]
-struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, intensity: f32, black_level: f32 }
+struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, intensity: f32, black_level: f32, sdr_gain: f32 }
 
 pub struct DeviceContext {
     pub pd: vk::PhysicalDevice, pub inst: vk::Instance, pub gdpa: vk::PFN_vkGetDeviceProcAddr, pub gipa: vk::PFN_vkGetInstanceProcAddr,
@@ -491,7 +493,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
         let bds = [vk::DescriptorSetLayoutBinding { binding: 0, descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1, stage_flags: vk::ShaderStageFlags::COMPUTE, p_immutable_samplers: std::ptr::null() },
                    vk::DescriptorSetLayoutBinding { binding: 1, descriptor_type: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 1, stage_flags: vk::ShaderStageFlags::COMPUTE, p_immutable_samplers: std::ptr::null() }];
         let mut dsl = vk::DescriptorSetLayout::null(); let _ = (cdsl)(dev, &vk::DescriptorSetLayoutCreateInfo { s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::DescriptorSetLayoutCreateFlags::empty(), binding_count: 2, p_bindings: bds.as_ptr() }, std::ptr::null(), &mut dsl);
-        let mut pl = vk::PipelineLayout::null(); let _ = (cpl)(dev, &vk::PipelineLayoutCreateInfo { s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineLayoutCreateFlags::empty(), set_layout_count: 1, p_set_layouts: &dsl, push_constant_range_count: 1, p_push_constant_ranges: &vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 32 } }, std::ptr::null(), &mut pl);
+        let mut pl = vk::PipelineLayout::null(); let _ = (cpl)(dev, &vk::PipelineLayoutCreateInfo { s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineLayoutCreateFlags::empty(), set_layout_count: 1, p_set_layouts: &dsl, push_constant_range_count: 1, p_push_constant_ranges: &vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 40 } }, std::ptr::null(), &mut pl);
         let stage = vk::PipelineShaderStageCreateInfo { s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineShaderStageCreateFlags::empty(), stage: vk::ShaderStageFlags::COMPUTE, module: sm, p_name: b"main\0".as_ptr() as *const c_char, p_specialization_info: std::ptr::null() };
         let mut pipe = vk::Pipeline::null(); let _ = (ccp)(dev, vk::PipelineCache::null(), 1, &vk::ComputePipelineCreateInfo { s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineCreateFlags::empty(), stage, layout: pl, base_pipeline_handle: vk::Pipeline::null(), base_pipeline_index: -1 }, std::ptr::null(), &mut pipe);
         let mut sampler = vk::Sampler::null(); let _ = (csamp)(dev, &vk::SamplerCreateInfo { s_type: vk::StructureType::SAMPLER_CREATE_INFO, p_next: std::ptr::null(), flags: vk::SamplerCreateFlags::empty(), mag_filter: vk::Filter::LINEAR, min_filter: vk::Filter::LINEAR, mipmap_mode: vk::SamplerMipmapMode::LINEAR, address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE, address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE, address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE, mip_lod_bias: 0.0, anisotropy_enable: vk::FALSE, max_anisotropy: 1.0, compare_enable: vk::FALSE, compare_op: vk::CompareOp::ALWAYS, min_lod: 0.0, max_lod: 0.0, border_color: vk::BorderColor::FLOAT_TRANSPARENT_BLACK, unnormalized_coordinates: vk::FALSE }, std::ptr::null(), &mut sampler);
@@ -651,7 +653,7 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                             (cpb)(cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::MEMORY_WRITE, dst_access_mask: vk::AccessFlags::SHADER_READ, old_layout: vk::ImageLayout::PRESENT_SRC_KHR, new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.proxy_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::SHADER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::GENERAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }].as_ptr());
                             (cbp)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe);
                             (cbds)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe_layout, 0, 1, &st.desc_sets[ii], 0, std::ptr::null());
-                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 36, &PushConstants { 
+                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 40, &PushConstants { 
                                 max_lum: HDR_CONFIG.max_lum, 
                                 mid_lum: HDR_CONFIG.mid_lum, 
                                 sat: HDR_CONFIG.sat, 
@@ -660,7 +662,8 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 height: st.height, 
                                 use_tensor: if st.has_tensor { 1 } else { 0 },
                                 intensity: HDR_CONFIG.intensity,
-                                black_level: HDR_CONFIG.black_level
+                                black_level: HDR_CONFIG.black_level,
+                                sdr_gain: HDR_CONFIG.sdr_gain,
                             } as *const _ as *const _);                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
                             let region = vk::ImageCopy { src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, src_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 } };
