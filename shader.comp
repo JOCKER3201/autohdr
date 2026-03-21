@@ -20,29 +20,73 @@ layout(push_constant) uniform PushConstants {
     uint  width;              // Image width
     uint  height;             // Image height
     float rcas_strength;      // RCAS Sharpening strength (0.0 - 1.0)
+    float fxaa_strength;      // FXAA 3.11 strength (0.0 - 1.0)
     float intensity;          // HDR transformation intensity (0.0 - 1.0)
     float black_level;        // Shadow floor adjustment
     float sdr_gain;           // Initial SDR brightness multiplier
     uint  output_mode;        // 0 = PQ (10-bit), 1 = scRGB (16-bit float)
 } pc;
 
+// --- FXAA 3.11 Implementation ---
+float rgb_to_luma(vec3 rgb) {
+    return dot(rgb, vec3(0.299, 0.587, 0.114));
+}
+
+vec3 ApplyFXAA(vec2 uv) {
+    vec3 rgbM = texture(inputTexture, uv).rgb;
+    if (pc.fxaa_strength <= 0.0) return rgbM;
+
+    vec2 res = 1.0 / vec2(pc.width, pc.height);
+    
+    vec3 rgbNW = textureOffset(inputTexture, uv, ivec2(-1, -1)).rgb;
+    vec3 rgbNE = textureOffset(inputTexture, uv, ivec2(1, -1)).rgb;
+    vec3 rgbSW = textureOffset(inputTexture, uv, ivec2(-1, 1)).rgb;
+    vec3 rgbSE = textureOffset(inputTexture, uv, ivec2(1, 1)).rgb;
+
+    float lumaM  = rgb_to_luma(rgbM);
+    float lumaNW = rgb_to_luma(rgbNW);
+    float lumaNE = rgb_to_luma(rgbNE);
+    float lumaSW = rgb_to_luma(rgbSW);
+    float lumaSE = rgb_to_luma(rgbSE);
+
+    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+
+    vec2 dir;
+    dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
+    dir.y =  ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+
+    float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) * (0.25 * 0.125), 0.0078125);
+    float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+
+    dir = min(vec2(8.0, 8.0), max(vec2(-8.0, -8.0), dir * rcpDirMin)) * res;
+
+    vec3 rgbA = 0.5 * (
+        texture(inputTexture, uv + dir * (1.0 / 3.0 - 0.5)).rgb +
+        texture(inputTexture, uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+    vec3 rgbB = rgbA * 0.5 + 0.25 * (
+        texture(inputTexture, uv + dir * (0.0 / 3.0 - 0.5)).rgb +
+        texture(inputTexture, uv + dir * (3.0 / 3.0 - 0.5)).rgb);
+
+    float lumaB = rgb_to_luma(rgbB);
+    vec3 fxaa_res = ((lumaB < lumaMin) || (lumaB > lumaMax)) ? rgbA : rgbB;
+    return mix(rgbM, fxaa_res, pc.fxaa_strength);
+}
+
 // --- AMD FidelityFX RCAS Implementation ---
 vec3 FsrRcasF(vec2 uv) {
     // RCAS is a robust contrast-adaptive sharpening filter.
-    // It operates on a 5-tap cross neighborhood.
-    // b d f
-    // h e g
-    // i j k
-    // We sample: e (center), b (up), d (left), f (right), h (down)
+    // To properly support FXAA before RCAS in a single pass, 
+    // we use FXAA for all taps. This is more expensive but correct.
     
-    vec3 e = texture(inputTexture, uv).rgb;
+    vec3 e = ApplyFXAA(uv);
     if (pc.rcas_strength <= 0.0) return e;
 
     vec2 off = 1.0 / vec2(pc.width, pc.height);
-    vec3 b = texture(inputTexture, uv + vec2(0, -off.y)).rgb;
-    vec3 d = texture(inputTexture, uv + vec2(-off.x, 0)).rgb;
-    vec3 f = texture(inputTexture, uv + vec2(off.x, 0)).rgb;
-    vec3 h = texture(inputTexture, uv + vec2(0, off.y)).rgb;
+    vec3 b = ApplyFXAA(uv + vec2(0, -off.y));
+    vec3 d = ApplyFXAA(uv + vec2(-off.x, 0));
+    vec3 f = ApplyFXAA(uv + vec2(off.x, 0));
+    vec3 h = ApplyFXAA(uv + vec2(0, off.y));
 
     // Luma: 0.25R + 0.5G + 0.25B (AMD's optimized luma)
     float bL = b.g * 0.5 + (b.r + b.b) * 0.25;
@@ -56,14 +100,9 @@ vec3 FsrRcasF(vec2 uv) {
     float mxL = max(max(bL, dL), max(max(fL, hL), eL));
 
     // Contrast-adaptive sharpening weight
-    // FSR_RCAS_LIMIT = 0.25 - (1/16) = 0.1875
     float ampL = clamp(min(mnL, 2.0 - mxL) / mxL, 0.0, 0.1875);
-    
-    // We map 0.0-1.0 to the "stops" logic (0.0 stops = 1.0, higher stops = lower weight)
-    // For simplicity, we just use pc.rcas_strength as the weight multiplier.
     float wL = ampL * pc.rcas_strength;
 
-    // Filter: (b+d+f+h)*wL + e normalized by 4*wL + 1
     return ((b + d + f + h) * wL + e) / (4.0 * wL + 1.0);
 }
 

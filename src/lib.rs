@@ -49,7 +49,7 @@ lazy_static::lazy_static! {
 
 struct HdrConfig { 
     pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, 
-    pub intensity: f32, pub black_level: f32, pub rcas_strength: f32, pub sdr_gain: f32,
+    pub intensity: f32, pub black_level: f32, pub rcas_strength: f32, pub fxaa_strength: f32, pub sdr_gain: f32,
     pub preferred_format: OutputFormat
 }
 
@@ -157,6 +157,7 @@ impl HdrConfig {
         let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let rcas_strength = std::env::var("AUTOHDR_RCAS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+        let fxaa_strength = std::env::var("AUTOHDR_FXAA").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
         let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).or(sys_mid_lum).unwrap_or(100.0);
         let sdr_gain = sdr_brightness / 100.0;
         
@@ -165,17 +166,17 @@ impl HdrConfig {
             _ => OutputFormat::PQ,
         };
 
-        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} Gain={} Format={:?}", 
-            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, sdr_gain, preferred_format);
+        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} Gain={} Format={:?}", 
+            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, fxaa_strength, sdr_gain, preferred_format);
             
-        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, sdr_gain, preferred_format }
+        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, fxaa_strength, sdr_gain, preferred_format }
     }
 }
 
 #[repr(C)] #[derive(Clone, Copy)]
 struct PushConstants { 
     max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, 
-    rcas_strength: f32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
+    rcas_strength: f32, fxaa_strength: f32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
 }
 
 pub struct DeviceContext {
@@ -785,6 +786,7 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 width: st.width, 
                                 height: st.height, 
                                 rcas_strength: HDR_CONFIG.rcas_strength,
+                                fxaa_strength: HDR_CONFIG.fxaa_strength,
                                 intensity: HDR_CONFIG.intensity,
                                 black_level: HDR_CONFIG.black_level,
                                 sdr_gain: HDR_CONFIG.sdr_gain,
