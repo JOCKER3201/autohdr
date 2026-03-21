@@ -12,3 +12,5 @@ crate-type = ["cdylib"]
 ash = "0.37.2"
 lazy_static = "1.4.0"
 log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

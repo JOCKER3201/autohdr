@@ -3,6 +3,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 use std::sync::RwLock;
 use std::collections::HashMap;
+use serde::Deserialize;
 
 include!("shader.rs");
 
@@ -25,18 +26,132 @@ lazy_static::lazy_static! {
     static ref HDR_CONFIG: HdrConfig = HdrConfig::from_env();
 }
 
+#[derive(Deserialize)] struct KScreenDoctorOutput { outputs: Vec<KScreenOutput> }
+#[derive(Deserialize)] struct KScreenOutput { 
+    name: String, 
+    primary: bool, 
+    #[serde(rename = "maxBrightnessOverride")] max_brightness_override: Option<f32>, 
+    #[serde(rename = "maxBrightness")] max_brightness: Option<f32>,
+    #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
+}
+
 struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, pub intensity: f32, pub black_level: f32, pub sdr_gain: f32 }
 impl HdrConfig {
+    fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.contains(connector) && name.contains("card") {
+                    let edid_path = entry.path().join("edid");
+                    if let Ok(edid) = std::fs::read(edid_path) {
+                        if edid.len() >= 128 {
+                            let extensions = edid[126] as usize;
+                            for ext in 1..=extensions {
+                                let block_start = ext * 128;
+                                if edid.len() < block_start + 128 { break; }
+                                let block = &edid[block_start..block_start + 128];
+                                if block[0] == 0x02 { // CEA-861 Extension
+                                    let d_start = block[2] as usize;
+                                    let mut i = 4;
+                                    while i < d_start && i < 127 {
+                                        let tag = (block[i] & 0xE0) >> 5;
+                                        let len = (block[i] & 0x1F) as usize;
+                                        if tag == 0x07 && len >= 3 { // Extended Tag
+                                            if block[i+1] == 0x06 { // HDR Static Metadata Block
+                                                let mut max_lum = None;
+                                                let mut avg_lum = None;
+                                                // CEA-861-G: 
+                                                // block[i]   : Tag/Len
+                                                // block[i+1] : Extended Tag (0x06)
+                                                // block[i+2] : EOTF
+                                                // block[i+3] : Static Metadata Descriptor ID
+                                                // block[i+4] : Desired Content Max Luminance
+                                                // block[i+5] : Desired Content Max Frame-average Luminance
+                                                if len >= 4 {
+                                                    let v = block[i+4]; 
+                                                    if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
+                                                }
+                                                if len >= 5 {
+                                                    let v = block[i+5];
+                                                    if v > 0 { avg_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
+                                                }
+                                                return (max_lum, avg_lum);
+                                            }
+                                        }
+                                        i += 1 + len;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (None, None)
+    }
+
+    fn detect_system_config() -> (Option<f32>, Option<f32>, String) {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let mut connector_name = String::new();
+        let mut sys_max_lum = None;
+        let mut sys_sdr_brightness = None;
+
+        if desktop.contains("kde") {
+            if let Ok(output) = std::process::Command::new("kscreen-doctor").arg("-j").output() {
+                if let Ok(data) = serde_json::from_slice::<KScreenDoctorOutput>(&output.stdout) {
+                    if let Some(primary) = data.outputs.into_iter().find(|o| o.primary) {
+                        connector_name = primary.name;
+                        sys_max_lum = primary.max_brightness_override.or(primary.max_brightness);
+                        sys_sdr_brightness = primary.sdr_brightness;
+                    }
+                }
+            }
+        } else if desktop.contains("gnome") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = format!("{}/.config/monitors.xml", home);
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Some(pos) = content.find("<primary>yes</primary>") {
+                    let start = content[..pos].rfind("<logicalmonitor>").unwrap_or(0);
+                    let end = content[pos..].find("</logicalmonitor>").map(|e| pos + e).unwrap_or(content.len());
+                    let block = &content[start..end];
+                    if let Some(c_start) = block.find("<connector>") {
+                        if let Some(c_end) = block[c_start..].find("</connector>") {
+                            connector_name = block[c_start + 11..c_start + c_end].to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        if !connector_name.is_empty() {
+            let (edid_max, edid_avg) = Self::get_edid_luminance(&connector_name);
+            // System values (KDE overrides) have priority over raw EDID values
+            let max = sys_max_lum.or(edid_max);
+            let mid = sys_sdr_brightness.or(edid_avg);
+            return (max, mid, connector_name);
+        }
+        (None, None, "Unknown".to_string())
+    }
+
     fn from_env() -> Self {
-        let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1000.0);
-        let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(400.0);
+        let (sys_max_lum, sys_mid_lum, monitor_name) = Self::detect_system_config();
+        
+        let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).or(sys_max_lum).unwrap_or(1000.0);
+        
+        // Mid lum fallback: if env missing, try system mid_lum (SDR Brightness or EDID Avg), else 30% of max_lum
+        let mid_lum_default = sys_mid_lum.unwrap_or(max_lum * 0.3);
+        let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(mid_lum_default);
+        
         let sat = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).unwrap_or(100.0);
+        
+        // SDR Brightness fallback
+        let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).or(sys_mid_lum).unwrap_or(100.0);
         let sdr_gain = sdr_brightness / 100.0;
-        eprintln!("[Vulkan HDR Layer] Tryb Kompatybilności (CopyImage): Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={}", max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness);
+        
+        eprintln!("[Vulkan HDR Layer] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={}", monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness);
         Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain }
     }
 }
