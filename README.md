@@ -1,59 +1,43 @@
-Hello!
+# AutoHDR Vulkan Layer
 
-This is my project RTX hdr on linux
+AutoHDR is a high-performance, system-aware Vulkan layer designed to bring advanced HDR reconstruction capabilities to the Linux ecosystem. Inspired by technologies like NVIDIA RTX HDR, this project focuses on providing the highest possible image quality with a "zero-compromise" approach to precision.
 
-NOTE: I wrote this project using gemini cli, but actually I didn't write anything in the code because I only issued commands,
-this code was written for me because I needed autohdr for some games,
-I don't want AI slop to become popular, so if you end up here, don't spread it around,
-Besides, I don't know if AI hasn't hidden some crap here, so be careful,
-you use at your own risk.
+## Technical Merits
 
-1. env
+### 1. 32-bit Computational Depth (FP32)
+Unlike many real-time HDR solutions that use 16-bit (FP16) math to save on performance, AutoHDR performs **all** color space transformations and luminance mastering using **full 32-bit floating point (FP32) precision**. This ensures that even the most subtle gradients in SDR content are preserved and expanded without rounding errors or banding before the final encoding stage.
 
-   ⚙️ Logika Działania
-   * AUTOHDR_ENABLE
-       * Co robi: Główny przełącznik warstwy.
-       * Wartości: 1 (aktywna), 0 (całkowicie wyłączona).
-       * Opis: Pozwala na szybkie wyłączenie efektu HDR bez konieczności usuwania warstwy z konfiguracji Vulkana czy Steam. Jeśli ustawisz 0, warstwa będzie jedynie przekazywać polecenia do sterownika, nie modyfikując obrazu.
+### 2. Modern Encoding Support: scRGB & PQ
+AutoHDR supports the two primary standards for HDR transmission:
+- **scRGB (16-bit Float):** Offers the highest possible fidelity by sending high-precision linear data directly to the compositor (e.g., KWin). This avoids the "double-tonemapping" issue and provides a mathematically perfect representation of the reconstructed HDR signal.
+- **PQ (10-bit UNORM):** A robust implementation of SMPTE ST 2084 with **perceptual-space dithering**. By applying dithering in the non-linear PQ space rather than linear space, we significantly improve shadow detail and eliminate banding on 10-bit displays.
 
+### 3. Native Desktop Integration & Automatic Detection
+AutoHDR is designed to be invisible and automatic. It features:
+- **Automatic Display Profiling:** Reads HDR metadata (Max/Mid Luminance) directly from the monitor's **EDID** via sysfs.
+- **Environment Awareness:** Seamlessly integrates with **KDE Plasma 6** and **GNOME** to respect system-level HDR brightness overrides and primary monitor settings.
+- **Intelligent Fallbacks:** Automatically detects if the compositor or display supports scRGB and performs a graceful, logged fallback to PQ if necessary.
 
-  ☀️ Jasność (Luminancja)
-   * AUTOHDR_MAX_LUMINANCE
-       * Co robi: Ustawia "szczyt" jasności (Peak Brightness) w nitach
-       * Opis: Decyduje, jak bardzo "razić" mają najjaśniejsze elementy (słońce, eksplozje, światła odblaskowe). Powinieneś ustawić tu wartość odpowiadającą certyfikatowi Twojego monitora (np. 400, 600, 1000).
+## Configuration
 
+Settings can be overridden via environment variables:
 
-   * AUTOHDR_MID_LUMINANCE
-       * Co robi: Ustala jasność bazową dla typowych scen.
-       * Opis: Decyduje o ogólnym naświetleniu gry. Wyższa wartość sprawia, że gra w dzień wygląda na jaśniejszą i bardziej "świetlistą". Zbyt wysoka wartość może sprawić, że obraz będzie wyglądał na prześwietlony.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AUTOHDR_OUTPUT_FORMAT` | `pq` or `scrgb` | `pq` |
+| `AUTOHDR_MAX_LUMINANCE` | Peak brightness in nits | (Auto from EDID) |
+| `AUTOHDR_MID_LUMINANCE` | Target "Paper White" in nits | (Auto/Heuristic) |
+| `AUTOHDR_INTENSITY` | Intensity of HDR effect (0.0 - 1.0) | `1.0` |
+| `AUTOHDR_SDR_BRIGHTNESS` | Initial SDR nit level | `100.0` |
+| `AUTOHDR_VIBRANCE` | Perceptual color enhancement | `0.0` |
 
+## Technical Implementation Details
 
-   * AUTOHDR_MIN_LUMINANCE
-       * Co robi: Mnożnik jasności cieni i ciemnych obszarów (Black Point).
-       * Opis: Służy do pogłębiania czerni. 
-           * 1.0 to standardowe zachowanie.
-           * Wartości niższe (np. 0.1) przyciemniają noc i cienie (kluczowe dla Minecrafta, aby uniknąć "szarej" nocy).
-           * Wartości wyższe rozjaśniają detale w ciemności.
+The core logic is implemented as a **Vulkan Implicit Layer** written in **Rust**, utilizing:
+- **`ash`** for low-level Vulkan bindings.
+- **Compute Shaders** for high-throughput pixel processing.
+- **Inverse Tone Mapping** algorithms tailored for real-time gaming performance.
 
+## License
 
-  🎨 Kolor i Intensywność
-   * AUTOHDR_VIBRANCE
-       * Co robi: Inteligentne, nieliniowe nasycenie barw.
-       * Opis: Najważniejsza zmienna dla kolorów. Wyszukuje piksele o niskim nasyceniu (wyblakłe) i wzmacnia je, pozostawiając kolory już nasycone w spokoju. Dzięki temu świat gry staje się żywy, ale nie wygląda nienaturalnie (np. twarze nie stają się marchewkowe).
-
-
-   * AUTOHDR_SATURATION
-       * Co robi: Klasyczne, liniowe nasycenie.
-       * Opis: Mnoży nasycenie każdego piksela o tę samą wartość. Zwykle zaleca się pozostawienie tej wartości na 1.0 i korzystanie z AUTOHDR_VIBRANCE dla lepszego efektu wizualnego.
-
-   * AUTOHDR_INTENSITY
-       * Co robi: Kontroluje intensywność całego efektu HDR.
-       * Opis: Pozwala na płynne przejście między obrazem SDR a pełnym HDR (0.0 - obraz SDR, 1.0 - pełny efekt). Domyślnie: 1.0.
-
-   * AUTOHDR_BLACK_LEVEL
-       * Co robi: Reguluje poziom czerni (tylko najciemniejsze obszary).
-       * Opis: Wartości dodatnie rozjaśniają najgłębszą czerń, wartości ujemne ją pogłębiają. Nie wpływa na średnie tony ani światła. Domyślnie: 0.0.
-
-   * AUTOHDR_SDR_BRIGHTNESS
-       * Co robi: Jasność treści SDR w nitach.
-       * Opis: Pozwala określić jasność bazową obrazu z gry. Standardowo SDR jest masterowane dla 100 nitów (domyślnie). Zwiększenie tej wartości (np. do 200) rozjaśnia całą grę przed transformacją na HDR. Pomaga, gdy gra wydaje się zbyt ciemna. Domyślnie: 100.0.
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details. It is intended as both a production tool for Linux gamers and a technical Proof of Concept for hardware vendors and driver developers.

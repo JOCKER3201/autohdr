@@ -5,6 +5,16 @@ use std::sync::RwLock;
 use std::collections::HashMap;
 use serde::Deserialize;
 
+/**
+ * AutoHDR Vulkan Layer
+ * 
+ * A high-performance Vulkan layer that automatically enhances SDR content to HDR.
+ * Key Features:
+ * - 32-bit (FP32) computational depth for maximum precision.
+ * - Automatic display detection via EDID and Desktop Environment (KDE/GNOME) integration.
+ * - Support for PQ (10-bit) and scRGB (16-bit float) output formats.
+ */
+
 include!("shader.rs");
 
 #[repr(C)] pub struct NegotiateLayerInterface { pub s_type: u32, pub p_next: *const c_void, pub loader_layer_interface_version: u32, pub pfn_get_instance_proc_addr: Option<vk::PFN_vkGetInstanceProcAddr>, pub pfn_get_device_proc_addr: Option<vk::PFN_vkGetDeviceProcAddr>, pub pfn_get_physical_device_tool_properties: Option<*const c_void> }
@@ -35,7 +45,7 @@ lazy_static::lazy_static! {
     #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
 }
 
-#[derive(Clone, Copy, PartialEq)] enum OutputFormat { PQ, ScRGB }
+#[derive(Clone, Copy, PartialEq, Debug)] enum OutputFormat { PQ, ScRGB }
 
 struct HdrConfig { 
     pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, 
@@ -44,10 +54,13 @@ struct HdrConfig {
 }
 
 impl HdrConfig {
+    /// Attempts to read peak and average luminance from the monitor's EDID via sysfs.
     fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
-        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        let drm_dir = "/sys/class/drm";
+        if let Ok(entries) = std::fs::read_dir(drm_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
+                // Match connector name (e.g., "DP-5" matches directory containing "DP-5")
                 if name.contains(connector) && name.contains("card") {
                     let edid_path = entry.path().join("edid");
                     if let Ok(edid) = std::fs::read(edid_path) {
@@ -67,6 +80,7 @@ impl HdrConfig {
                                             if block[i+1] == 0x06 { // HDR Static Metadata Block
                                                 let mut max_lum = None;
                                                 let mut avg_lum = None;
+                                                // CEA-861-G: Byte 6 (i+4) is Max Lum, Byte 7 (i+5) is Max Frame-avg
                                                 if len >= 4 {
                                                     let v = block[i+4]; 
                                                     if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
@@ -90,6 +104,7 @@ impl HdrConfig {
         (None, None)
     }
 
+    /// Detects system HDR configuration by querying the Desktop Environment or reading EDID.
     fn detect_system_config() -> (Option<f32>, Option<f32>, String) {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
         let mut connector_name = String::new();
@@ -125,6 +140,7 @@ impl HdrConfig {
 
         if !connector_name.is_empty() {
             let (edid_max, edid_avg) = Self::get_edid_luminance(&connector_name);
+            // System values (DE overrides) take precedence over raw hardware EDID.
             return (sys_max_lum.or(edid_max), sys_sdr_brightness.or(edid_avg), connector_name);
         }
         (None, None, "Unknown".to_string())
@@ -132,6 +148,7 @@ impl HdrConfig {
 
     fn from_env() -> Self {
         let (sys_max_lum, sys_mid_lum, monitor_name) = Self::detect_system_config();
+        
         let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).or(sys_max_lum).unwrap_or(1000.0);
         let mid_lum_default = sys_mid_lum.unwrap_or(max_lum * 0.3);
         let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(mid_lum_default);
@@ -147,9 +164,8 @@ impl HdrConfig {
             _ => OutputFormat::PQ,
         };
 
-        eprintln!("[Vulkan HDR Layer] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={} Format={:?}", 
-            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness, 
-            if preferred_format == OutputFormat::ScRGB { "scRGB" } else { "PQ" });
+        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} Gain={} Format={:?}", 
+            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain, preferred_format);
             
         Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain, preferred_format }
     }
@@ -158,12 +174,12 @@ impl HdrConfig {
 #[repr(C)] #[derive(Clone, Copy)]
 struct PushConstants { 
     max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, 
-    use_tensor: u32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
+    _padding: u32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
 }
 
 pub struct DeviceContext {
     pub pd: vk::PhysicalDevice, pub inst: vk::Instance, pub gdpa: vk::PFN_vkGetDeviceProcAddr, pub gipa: vk::PFN_vkGetInstanceProcAddr,
-    pub is_nvidia: bool, pub has_tensor: bool,
+    pub is_nvidia: bool,
     pub create_image: Option<vk::PFN_vkCreateImage>, pub get_image_mem_req: Option<vk::PFN_vkGetImageMemoryRequirements>,
     pub allocate_mem: Option<vk::PFN_vkAllocateMemory>, pub bind_image_mem: Option<vk::PFN_vkBindImageMemory>,
     pub create_image_view: Option<vk::PFN_vkCreateImageView>, pub create_shader_module: Option<vk::PFN_vkCreateShaderModule>,
@@ -206,7 +222,6 @@ pub struct SwapchainState {
     pub sampler: vk::Sampler,
     pub present_semaphores: Vec<vk::Semaphore>,
     pub bypass: bool,
-    pub has_tensor: bool,
     pub output_mode: u32, // 0 = PQ, 1 = scRGB
 }
 
@@ -300,7 +315,7 @@ unsafe extern "system" fn hook_get_pd_surface_formats(pd: vk::PhysicalDevice, su
         Some(f) => f,
         None => return vk::Result::ERROR_INITIALIZATION_FAILED,
     };
-    let real_f: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR = std::mem::transmute(next_gipa(inst, b"vkGetPhysicalDeviceSurfaceFormatsKHR\0".as_ptr() as *const c_char).expect("No real_f"));
+    let real_f: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR = std::mem::transmute(next_gipa(inst, b"vkGetPhysicalDeviceSurfaceFormatsKHR\0".as_ptr() as *const c_char).expect("Failed to locate real vkGetPhysicalDeviceSurfaceFormatsKHR"));
     let mut count = 0;
     let mut res = (real_f)(pd, surface, &mut count, std::ptr::null_mut());
     if res != vk::Result::SUCCESS { return res; }
@@ -333,7 +348,7 @@ unsafe extern "system" fn hook_get_pd_surface_formats2(pd: vk::PhysicalDevice, p
         Some(f) => f,
         None => return vk::Result::ERROR_INITIALIZATION_FAILED,
     };
-    let real_f: vk::PFN_vkGetPhysicalDeviceSurfaceFormats2KHR = std::mem::transmute(next_gipa(inst, b"vkGetPhysicalDeviceSurfaceFormats2KHR\0".as_ptr() as *const c_char).expect("No real_f"));
+    let real_f: vk::PFN_vkGetPhysicalDeviceSurfaceFormats2KHR = std::mem::transmute(next_gipa(inst, b"vkGetPhysicalDeviceSurfaceFormats2KHR\0".as_ptr() as *const c_char).expect("Failed to locate real vkGetPhysicalDeviceSurfaceFormats2KHR"));
     let mut count = 0;
     let mut res = (real_f)(pd, p_info, &mut count, std::ptr::null_mut());
     if res != vk::Result::SUCCESS { return res; }
@@ -415,7 +430,11 @@ unsafe extern "system" fn hook_create_instance(p_ci: *const vk::InstanceCreateIn
             (*li).p_layer_info = (*(*li).p_layer_info).p_next;
             if let Some(f) = next_gipa(vk::Instance::null(), b"vkCreateInstance\0".as_ptr() as *const c_char) {
                 let res = (std::mem::transmute::<_, vk::PFN_vkCreateInstance>(f))(&ci, p_al, p_inst);
-                if res == vk::Result::SUCCESS { INSTANCE_GIPA.write().unwrap().insert(*p_inst, next_gipa); GLOBAL_INSTANCE.write().unwrap().replace(*p_inst); GLOBAL_GIPA.write().unwrap().replace(next_gipa); }
+                if res == vk::Result::SUCCESS { 
+                    INSTANCE_GIPA.write().unwrap().insert(*p_inst, next_gipa); 
+                    GLOBAL_INSTANCE.write().unwrap().replace(*p_inst); 
+                    GLOBAL_GIPA.write().unwrap().replace(next_gipa); 
+                }
                 return res;
             }
         }
@@ -453,59 +472,6 @@ unsafe extern "system" fn hook_create_device(pd: vk::PhysicalDevice, p_ci: *cons
                 (pfn_props)(pd, &mut props);
             }
             let is_nvidia = props.vendor_id == 0x10DE;
-            let mut has_tensor = false;
-            let mut tensor_ext_to_enable = Vec::new();
-
-            if is_nvidia {
-                let mut ext_count = 0;
-                if let Some(f_ext) = next_gipa(inst, b"vkEnumerateDeviceExtensionProperties\0".as_ptr() as *const c_char) {
-                    let pfn_ext: vk::PFN_vkEnumerateDeviceExtensionProperties = std::mem::transmute(f_ext);
-                    let _ = (pfn_ext)(pd, std::ptr::null(), &mut ext_count, std::ptr::null_mut());
-                    let mut extensions = vec![vk::ExtensionProperties::default(); ext_count as usize];
-                    let _ = (pfn_ext)(pd, std::ptr::null(), &mut ext_count, extensions.as_mut_ptr());
-                    
-                    let available_exts: Vec<_> = extensions.iter().map(|e| {
-                        CStr::from_ptr(e.extension_name.as_ptr()).to_str().unwrap_or("")
-                    }).collect();
-
-                    if available_exts.contains(&"VK_NV_cooperative_matrix") && available_exts.contains(&"VK_KHR_shader_float16_int8") {
-                        has_tensor = true;
-                        tensor_ext_to_enable.push(b"VK_NV_cooperative_matrix\0".as_ptr() as *const c_char);
-                        tensor_ext_to_enable.push(b"VK_KHR_shader_float16_int8\0".as_ptr() as *const c_char);
-                        tensor_ext_to_enable.push(b"VK_KHR_storage_buffer_storage_class\0".as_ptr() as *const c_char);
-                    }
-                }
-            }
-
-            if has_tensor {
-                for &ext in &tensor_ext_to_enable {
-                    if !exts.iter().any(|&e| CStr::from_ptr(e) == CStr::from_ptr(ext)) {
-                        exts.push(ext);
-                    }
-                }
-                ci.enabled_extension_count = exts.len() as u32;
-                ci.pp_enabled_extension_names = exts.as_ptr();
-            }
-
-            let mut feat_tensor = vk::PhysicalDeviceCooperativeMatrixFeaturesNV {
-                s_type: vk::StructureType::PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV,
-                p_next: ci.p_next as *mut _,
-                cooperative_matrix: vk::TRUE,
-                cooperative_matrix_robust_buffer_access: vk::FALSE,
-            };
-            let mut feat_f16 = vk::PhysicalDeviceShaderFloat16Int8Features {
-                s_type: vk::StructureType::PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
-                p_next: if has_tensor { &mut feat_tensor as *mut _ as *mut _ } else { ci.p_next as *mut _ },
-                shader_float16: vk::TRUE,
-                shader_int8: vk::FALSE,
-            };
-            if has_tensor {
-                ci.p_next = &mut feat_f16 as *mut _ as *mut _;
-            }
-
-            if is_nvidia {
-                eprintln!("[Vulkan HDR Layer] Wykryto NVIDIA GPU. Tensor Cores: {}", if has_tensor { "TAK (Aktywowano)" } else { "NIE" });
-            }
 
             if let Some(f) = next_gipa(inst, b"vkCreateDevice\0".as_ptr() as *const c_char) {
                 let res = (std::mem::transmute::<_, vk::PFN_vkCreateDevice>(f))(pd, &ci, p_al, p_dev);
@@ -514,7 +480,7 @@ unsafe extern "system" fn hook_create_device(pd: vk::PhysicalDevice, p_ci: *cons
                     let f_dev = |n: &[u8]| next_gdpa(*p_dev, n.as_ptr() as *const c_char).or_else(|| next_gipa(inst, n.as_ptr() as *const c_char));
                     DEVICE_CONTEXTS.write().unwrap().insert(*p_dev, DeviceContext {
                         pd, inst, gdpa: next_gdpa, gipa: next_gipa,
-                        is_nvidia, has_tensor,
+                        is_nvidia,
                         create_image: f_dev(b"vkCreateImage\0").map(|p| std::mem::transmute(p)),
                         get_image_mem_req: f_dev(b"vkGetImageMemoryRequirements\0").map(|p| std::mem::transmute(p)),
                         allocate_mem: f_dev(b"vkAllocateMemory\0").map(|p| std::mem::transmute(p)),
@@ -580,7 +546,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
     };
     
     let inst = match *GLOBAL_INSTANCE.read().unwrap() { Some(i) => i, None => return vk::Result::ERROR_INITIALIZATION_FAILED };
-    let real_get_formats: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR = std::mem::transmute((c.gipa)(inst, b"vkGetPhysicalDeviceSurfaceFormatsKHR\0".as_ptr() as *const c_char).expect("No real_get_formats"));
+    let real_get_formats: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR = std::mem::transmute((c.gipa)(inst, b"vkGetPhysicalDeviceSurfaceFormatsKHR\0".as_ptr() as *const c_char).expect("Failed to locate real vkGetPhysicalDeviceSurfaceFormatsKHR"));
     let mut count = 0;
     let _ = (real_get_formats)(c.pd, (*p_ci).surface, &mut count, std::ptr::null_mut());
     let mut formats = vec![vk::SurfaceFormatKHR::default(); count as usize];
@@ -602,7 +568,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
                 mi.image_format = vk::Format::R16G16B16A16_SFLOAT;
                 mi.image_color_space = vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT;
             } else {
-                eprintln!("[Vulkan HDR Layer] Fallback: scRGB nie jest obsługiwane przez środowisko/monitor. Używam PQ.");
+                eprintln!("[AutoHDR] Info: scRGB not supported by DE/Monitor. Falling back to PQ.");
                 requested_format = OutputFormat::PQ;
                 output_mode = 0;
             }
@@ -617,7 +583,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
     
     let mut res = (real_f)(dev, &mi, p_al, p_sc);
     if res != vk::Result::SUCCESS && !bypass {
-        eprintln!("[Vulkan HDR Layer] vkCreateSwapchainKHR failed with HDR format, retrying with original SDR format: {:?}", res);
+        eprintln!("[AutoHDR] Error: HDR Swapchain creation failed, retrying with original SDR format: {:?}", res);
         res = (real_f)(dev, p_ci, p_al, p_sc);
         if res == vk::Result::SUCCESS {
             bypass = true;
@@ -625,7 +591,6 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
     }
 
     if res != vk::Result::SUCCESS {
-        eprintln!("[Vulkan HDR Layer] vkCreateSwapchainKHR failed: {:?}", res);
         return res;
     }
 
@@ -638,7 +603,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             desc_layout: vk::DescriptorSetLayout::null(), desc_pool: vk::DescriptorPool::null(), 
             desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), 
             sampler: vk::Sampler::null(), present_semaphores: Vec::new(), bypass: true,
-            has_tensor: c.has_tensor, output_mode
+            output_mode
         });
         return res;
     }
@@ -656,7 +621,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             let dsm: vk::PFN_vkDestroyShaderModule = std::mem::transmute(f);
             (dsm)(dev, sm, std::ptr::null());
         }
-        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, has_tensor: c.has_tensor, output_mode });
+        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, output_mode });
     }
     res
 }
@@ -818,7 +783,7 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 vibrance: HDR_CONFIG.vibrance,
                                 width: st.width, 
                                 height: st.height, 
-                                use_tensor: if st.has_tensor { 1 } else { 0 },
+                                _padding: 0,
                                 intensity: HDR_CONFIG.intensity,
                                 black_level: HDR_CONFIG.black_level,
                                 sdr_gain: HDR_CONFIG.sdr_gain,

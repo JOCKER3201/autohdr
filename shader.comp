@@ -1,34 +1,45 @@
 #version 450
 
+/**
+ * AutoHDR Compute Shader
+ * 
+ * Performs high-precision Inverse Tone Mapping (SDR to HDR conversion).
+ * Computational depth: 32-bit float (FP32) throughout the entire pipeline.
+ */
+
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D inputTexture;
 layout(set = 0, binding = 1) uniform writeonly image2D outputImage;
 
 layout(push_constant) uniform PushConstants {
-    float max_lum;
-    float mid_lum;
-    float sat;
-    float vibrance;
-    uint width;
-    uint height;
-    uint unused_padding;
-    float intensity;
-    float black_level;
-    float sdr_gain;
-    uint output_mode; // 0 = PQ (10-bit), 1 = scRGB (16-bit float)
+    float max_luminance;      // Peak brightness of the display (nits)
+    float mid_luminance;      // Target "Paper White" brightness (nits)
+    float saturation;         // Global saturation multiplier
+    float vibrance;           // Smart saturation multiplier
+    uint  width;              // Image width
+    uint  height;             // Image height
+    uint  _padding;           // Explicit padding for alignment
+    float intensity;          // HDR transformation intensity (0.0 - 1.0)
+    float black_level;        // Shadow floor adjustment
+    float sdr_gain;           // Initial SDR brightness multiplier
+    uint  output_mode;        // 0 = PQ (10-bit), 1 = scRGB (16-bit float)
 } pc;
 
+// BT.709 to BT.2020 Color Space Conversion Matrix
 const mat3 Rec709_to_2020 = mat3(
     0.6274, 0.0691, 0.0164,
     0.3293, 0.9195, 0.0880,
     0.0433, 0.0114, 0.8956
 );
 
+// Standard sRGB EOTF (Non-linear to Linear)
 vec3 srgb_to_linear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
 }
 
+// SMPTE ST 2084 (PQ) Inverse EOTF (Linear to PQ)
+// Optimized for full FP32 precision.
 vec3 linear_to_pq(vec3 c) {
     const float m1 = 2610.0 / 16384.0;
     const float m2 = 2523.0 / 4096.0 * 128.0;
@@ -39,11 +50,12 @@ vec3 linear_to_pq(vec3 c) {
     return pow((c1 + c2 * cp) / (1.0 + c3 * cp), vec3(m2));
 }
 
+// Perceptual Vibrance adjustment
 vec3 apply_vibrance(vec3 color, float vibrance) {
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float max_color = max(color.r, max(color.g, color.b));
-    float min_color = min(color.r, min(color.g, color.b));
-    float sat = max_color - min_color;
+    float max_c = max(color.r, max(color.g, color.b));
+    float min_c = min(color.r, min(color.g, color.b));
+    float sat = max_c - min_c;
     return mix(vec3(luma), color, 1.0 + vibrance * (1.0 - sat));
 }
 
@@ -51,6 +63,7 @@ void main() {
     uint idx = gl_LocalInvocationID.x;
     ivec2 tile_origin = ivec2(gl_WorkGroupID.xy) * 16;
 
+    // Each thread processes a column of 8 pixels within a 16x16 tile
     for (int i = 0; i < 8; ++i) {
         ivec2 pos = tile_origin + ivec2(idx % 16, (idx / 16) * 8 + i);
         if (pos.x >= pc.width || pos.y >= pc.height) continue;
@@ -58,21 +71,34 @@ void main() {
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
         vec4 sdr_sample = texture(inputTexture, uv);
 
-        // All calculations in FP32 for maximum precision (32-bit depth)
+        // --- HDR Reconstruction Pipeline (All calculations in FP32) ---
+        
+        // 1. Convert to Linear and apply initial gain
         vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
         color *= pc.sdr_gain;
+
+        // 2. Map to BT.2020 Primaries
         color = Rec709_to_2020 * color;
+
+        // 3. Apply Vibrance/Saturation
         color = apply_vibrance(color, pc.vibrance);
 
+        // 4. Perceptual HDR Transformation
         float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+        
+        // Shadow recovery/black level lift logic
         float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
         luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
 
-        float target_luma = mix(luma * 100.0, luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum), pc.intensity);
-        vec3 color_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_lum, pc.intensity);
+        // Contrast-aware luminance expansion
+        float target_luma = mix(luma * 100.0, luma * pc.mid_luminance + pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance), pc.intensity);
+        vec3 color_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_luminance, pc.intensity);
+
+        // --- Final Output Encoding ---
 
         if (pc.output_mode == 1) {
-            // scRGB: Linear sRGB (using BT.709 primaries), 1.0 = 80 nits
+            // mode: scRGB (16-bit Float)
+            // Color space: Linear Rec.709 (scRGB standard), 1.0 = 80 nits.
             const mat3 BT2020_to_Rec709 = mat3(
                 1.6605, -0.1246, -0.0182,
                 -0.5876, 1.1329, -0.1006,
@@ -81,12 +107,13 @@ void main() {
             vec3 color_rec709 = BT2020_to_Rec709 * color_linear;
             imageStore(outputImage, pos, vec4(color_rec709 / 80.0, sdr_sample.a));
         } else {
-            // PQ: BT.2020 + PQ curve (10-bit)
+            // mode: PQ (10-bit UNORM)
+            // Color space: BT.2020 + SMPTE ST 2084 curve.
             vec3 pq = linear_to_pq(color_linear / 10000.0);
             
-            // Improved Dithering in PQ space
-            const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
-            float d = dither[(pos.x % 2) + (pos.y % 2) * 2];
+            // Ordered Dithering in PQ space to mitigate 10-bit banding
+            const float dither_pattern[4] = float[](0.0, 0.5, 0.25, 0.75);
+            float d = dither_pattern[(pos.x % 2) + (pos.y % 2) * 2];
             pq += (d - 0.5) / 1023.0;
             
             imageStore(outputImage, pos, vec4(pq, sdr_sample.a));
