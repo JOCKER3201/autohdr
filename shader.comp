@@ -69,13 +69,13 @@ void main() {
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
         vec4 sdr_sample = texture(inputTexture, uv);
 
-        float vib_val = pc.vibrance + 0.5;
+        float vib_val = pc.vibrance;
 
         if (pc.use_tensor == 1) {
             f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
             color = Rec709_to_2020_f16 * color;
             
-            // Apply vibrance (0.0 input = 0.5 internal)
+            // Apply vibrance
             color = apply_vibrance_f16(color, float16_t(vib_val));
             
             float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
@@ -94,7 +94,7 @@ void main() {
             vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
             color = mat3(Rec709_to_2020_f16) * color;
             
-            // Apply vibrance (0.0 input = 0.5 internal)
+            // Apply vibrance
             color = apply_vibrance(color, vib_val);
 
             float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
