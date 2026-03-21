@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 use ash::vk;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
@@ -5,7 +6,7 @@ use std::sync::RwLock;
 use std::collections::HashMap;
 use serde::Deserialize;
 
-/**
+/*
  * AutoHDR Vulkan Layer
  * 
  * A high-performance Vulkan layer that automatically enhances SDR content to HDR.
