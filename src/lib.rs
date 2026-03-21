@@ -35,7 +35,14 @@ lazy_static::lazy_static! {
     #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
 }
 
-struct HdrConfig { pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, pub intensity: f32, pub black_level: f32, pub sdr_gain: f32 }
+#[derive(Clone, Copy, PartialEq)] enum OutputFormat { PQ, ScRGB }
+
+struct HdrConfig { 
+    pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, 
+    pub intensity: f32, pub black_level: f32, pub sdr_gain: f32,
+    pub preferred_format: OutputFormat
+}
+
 impl HdrConfig {
     fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
@@ -60,13 +67,6 @@ impl HdrConfig {
                                             if block[i+1] == 0x06 { // HDR Static Metadata Block
                                                 let mut max_lum = None;
                                                 let mut avg_lum = None;
-                                                // CEA-861-G: 
-                                                // block[i]   : Tag/Len
-                                                // block[i+1] : Extended Tag (0x06)
-                                                // block[i+2] : EOTF
-                                                // block[i+3] : Static Metadata Descriptor ID
-                                                // block[i+4] : Desired Content Max Luminance
-                                                // block[i+5] : Desired Content Max Frame-average Luminance
                                                 if len >= 4 {
                                                     let v = block[i+4]; 
                                                     if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
@@ -125,39 +125,41 @@ impl HdrConfig {
 
         if !connector_name.is_empty() {
             let (edid_max, edid_avg) = Self::get_edid_luminance(&connector_name);
-            // System values (KDE overrides) have priority over raw EDID values
-            let max = sys_max_lum.or(edid_max);
-            let mid = sys_sdr_brightness.or(edid_avg);
-            return (max, mid, connector_name);
+            return (sys_max_lum.or(edid_max), sys_sdr_brightness.or(edid_avg), connector_name);
         }
         (None, None, "Unknown".to_string())
     }
 
     fn from_env() -> Self {
         let (sys_max_lum, sys_mid_lum, monitor_name) = Self::detect_system_config();
-        
         let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).or(sys_max_lum).unwrap_or(1000.0);
-        
-        // Mid lum fallback: if env missing, try system mid_lum (SDR Brightness or EDID Avg), else 30% of max_lum
         let mid_lum_default = sys_mid_lum.unwrap_or(max_lum * 0.3);
         let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(mid_lum_default);
-        
         let sat = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        
-        // SDR Brightness fallback
         let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).or(sys_mid_lum).unwrap_or(100.0);
         let sdr_gain = sdr_brightness / 100.0;
         
-        eprintln!("[Vulkan HDR Layer] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={}", monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness);
-        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain }
+        let preferred_format = match std::env::var("AUTOHDR_OUTPUT_FORMAT").unwrap_or_default().to_lowercase().as_str() {
+            "scrgb" => OutputFormat::ScRGB,
+            _ => OutputFormat::PQ,
+        };
+
+        eprintln!("[Vulkan HDR Layer] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} SDR_Bright={} Format={:?}", 
+            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_brightness, 
+            if preferred_format == OutputFormat::ScRGB { "scRGB" } else { "PQ" });
+            
+        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, sdr_gain, preferred_format }
     }
 }
 
 #[repr(C)] #[derive(Clone, Copy)]
-struct PushConstants { max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, use_tensor: u32, intensity: f32, black_level: f32, sdr_gain: f32 }
+struct PushConstants { 
+    max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, 
+    use_tensor: u32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
+}
 
 pub struct DeviceContext {
     pub pd: vk::PhysicalDevice, pub inst: vk::Instance, pub gdpa: vk::PFN_vkGetDeviceProcAddr, pub gipa: vk::PFN_vkGetInstanceProcAddr,
@@ -205,6 +207,7 @@ pub struct SwapchainState {
     pub present_semaphores: Vec<vk::Semaphore>,
     pub bypass: bool,
     pub has_tensor: bool,
+    pub output_mode: u32, // 0 = PQ, 1 = scRGB
 }
 
 #[no_mangle] pub unsafe extern "system" fn vkNegotiateLoaderLayerInterfaceVersion(p_vs: *mut NegotiateLayerInterface) -> vk::Result { (*p_vs).pfn_get_instance_proc_addr = Some(hook_get_instance_proc_addr); (*p_vs).pfn_get_device_proc_addr = Some(hook_get_device_proc_addr); vk::Result::SUCCESS }
@@ -304,11 +307,18 @@ unsafe extern "system" fn hook_get_pd_surface_formats(pd: vk::PhysicalDevice, su
     let mut formats = vec![vk::SurfaceFormatKHR::default(); count as usize];
     res = (real_f)(pd, surface, &mut count, formats.as_mut_ptr());
     if res != vk::Result::SUCCESS && res != vk::Result::INCOMPLETE { return res; }
-    let has_hdr = formats.iter().any(|f| f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT || f.color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT);
-    SURFACE_NATIVE_HDR.write().unwrap().insert(surface, has_hdr);
-    if !has_hdr {
+    
+    let has_pq = formats.iter().any(|f| f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT);
+    let has_scrgb = formats.iter().any(|f| f.color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT);
+    SURFACE_NATIVE_HDR.write().unwrap().insert(surface, has_pq || has_scrgb);
+    
+    if !has_pq {
         formats.push(vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT });
     }
+    if !has_scrgb {
+        formats.push(vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT });
+    }
+
     if p_formats.is_null() { *p_fc = formats.len() as u32; return vk::Result::SUCCESS; }
     let input_count = *p_fc as usize;
     *p_fc = formats.len() as u32;
@@ -330,11 +340,18 @@ unsafe extern "system" fn hook_get_pd_surface_formats2(pd: vk::PhysicalDevice, p
     let mut formats = vec![vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR::default() }; count as usize];
     res = (real_f)(pd, p_info, &mut count, formats.as_mut_ptr());
     if res != vk::Result::SUCCESS && res != vk::Result::INCOMPLETE { return res; }
-    let has_hdr = formats.iter().any(|f| f.surface_format.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT || f.surface_format.color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT);
-    SURFACE_NATIVE_HDR.write().unwrap().insert((*p_info).surface, has_hdr);
-    if !has_hdr {
+    
+    let has_pq = formats.iter().any(|f| f.surface_format.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT);
+    let has_scrgb = formats.iter().any(|f| f.surface_format.color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT);
+    SURFACE_NATIVE_HDR.write().unwrap().insert((*p_info).surface, has_pq || has_scrgb);
+
+    if !has_pq {
         formats.push(vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT } });
     }
+    if !has_scrgb {
+        formats.push(vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT } });
+    }
+
     if p_formats.is_null() { *p_fc = formats.len() as u32; return vk::Result::SUCCESS; }
     let input_count = *p_fc as usize;
     *p_fc = formats.len() as u32;
@@ -562,6 +579,16 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
         }
     };
     
+    let inst = match *GLOBAL_INSTANCE.read().unwrap() { Some(i) => i, None => return vk::Result::ERROR_INITIALIZATION_FAILED };
+    let real_get_formats: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR = std::mem::transmute((c.gipa)(inst, b"vkGetPhysicalDeviceSurfaceFormatsKHR\0".as_ptr() as *const c_char).expect("No real_get_formats"));
+    let mut count = 0;
+    let _ = (real_get_formats)(c.pd, (*p_ci).surface, &mut count, std::ptr::null_mut());
+    let mut formats = vec![vk::SurfaceFormatKHR::default(); count as usize];
+    let _ = (real_get_formats)(c.pd, (*p_ci).surface, &mut count, formats.as_mut_ptr());
+
+    let mut requested_format = HDR_CONFIG.preferred_format;
+    let mut output_mode = if requested_format == OutputFormat::ScRGB { 1 } else { 0 };
+    
     let mut bypass = false;
     if (*p_ci).image_color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT || (*p_ci).image_color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT {
         bypass = true;
@@ -570,8 +597,21 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
     let mut mi = *p_ci;
     let sdr_format = mi.image_format;
     if !bypass {
-        mi.image_format = vk::Format::A2B10G10R10_UNORM_PACK32;
-        mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+        if requested_format == OutputFormat::ScRGB {
+            if formats.iter().any(|f| f.color_space == vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT) {
+                mi.image_format = vk::Format::R16G16B16A16_SFLOAT;
+                mi.image_color_space = vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT;
+            } else {
+                eprintln!("[Vulkan HDR Layer] Fallback: scRGB nie jest obsługiwane przez środowisko/monitor. Używam PQ.");
+                requested_format = OutputFormat::PQ;
+                output_mode = 0;
+            }
+        }
+        
+        if requested_format == OutputFormat::PQ {
+            mi.image_format = vk::Format::A2B10G10R10_UNORM_PACK32;
+            mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+        }
         mi.image_usage |= vk::ImageUsageFlags::TRANSFER_DST;
     }
     
@@ -598,7 +638,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             desc_layout: vk::DescriptorSetLayout::null(), desc_pool: vk::DescriptorPool::null(), 
             desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), 
             sampler: vk::Sampler::null(), present_semaphores: Vec::new(), bypass: true,
-            has_tensor: c.has_tensor
+            has_tensor: c.has_tensor, output_mode
         });
         return res;
     }
@@ -608,7 +648,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
         let bds = [vk::DescriptorSetLayoutBinding { binding: 0, descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1, stage_flags: vk::ShaderStageFlags::COMPUTE, p_immutable_samplers: std::ptr::null() },
                    vk::DescriptorSetLayoutBinding { binding: 1, descriptor_type: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 1, stage_flags: vk::ShaderStageFlags::COMPUTE, p_immutable_samplers: std::ptr::null() }];
         let mut dsl = vk::DescriptorSetLayout::null(); let _ = (cdsl)(dev, &vk::DescriptorSetLayoutCreateInfo { s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::DescriptorSetLayoutCreateFlags::empty(), binding_count: 2, p_bindings: bds.as_ptr() }, std::ptr::null(), &mut dsl);
-        let mut pl = vk::PipelineLayout::null(); let _ = (cpl)(dev, &vk::PipelineLayoutCreateInfo { s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineLayoutCreateFlags::empty(), set_layout_count: 1, p_set_layouts: &dsl, push_constant_range_count: 1, p_push_constant_ranges: &vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 40 } }, std::ptr::null(), &mut pl);
+        let mut pl = vk::PipelineLayout::null(); let _ = (cpl)(dev, &vk::PipelineLayoutCreateInfo { s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineLayoutCreateFlags::empty(), set_layout_count: 1, p_set_layouts: &dsl, push_constant_range_count: 1, p_push_constant_ranges: &vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 44 } }, std::ptr::null(), &mut pl);
         let stage = vk::PipelineShaderStageCreateInfo { s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineShaderStageCreateFlags::empty(), stage: vk::ShaderStageFlags::COMPUTE, module: sm, p_name: b"main\0".as_ptr() as *const c_char, p_specialization_info: std::ptr::null() };
         let mut pipe = vk::Pipeline::null(); let _ = (ccp)(dev, vk::PipelineCache::null(), 1, &vk::ComputePipelineCreateInfo { s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::PipelineCreateFlags::empty(), stage, layout: pl, base_pipeline_handle: vk::Pipeline::null(), base_pipeline_index: -1 }, std::ptr::null(), &mut pipe);
         let mut sampler = vk::Sampler::null(); let _ = (csamp)(dev, &vk::SamplerCreateInfo { s_type: vk::StructureType::SAMPLER_CREATE_INFO, p_next: std::ptr::null(), flags: vk::SamplerCreateFlags::empty(), mag_filter: vk::Filter::LINEAR, min_filter: vk::Filter::LINEAR, mipmap_mode: vk::SamplerMipmapMode::LINEAR, address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE, address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE, address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE, mip_lod_bias: 0.0, anisotropy_enable: vk::FALSE, max_anisotropy: 1.0, compare_enable: vk::FALSE, compare_op: vk::CompareOp::ALWAYS, min_lod: 0.0, max_lod: 0.0, border_color: vk::BorderColor::FLOAT_TRANSPARENT_BLACK, unnormalized_coordinates: vk::FALSE }, std::ptr::null(), &mut sampler);
@@ -616,7 +656,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             let dsm: vk::PFN_vkDestroyShaderModule = std::mem::transmute(f);
             (dsm)(dev, sm, std::ptr::null());
         }
-        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, has_tensor: c.has_tensor });
+        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, has_tensor: c.has_tensor, output_mode });
     }
     res
 }
@@ -684,9 +724,12 @@ unsafe extern "system" fn hook_get_swapchain_images_khr(dev: vk::Device, sc: vk:
                     None => return vk::Result::ERROR_INITIALIZATION_FAILED,
                 };
                 let pfn_gpdmp: vk::PFN_vkGetPhysicalDeviceMemoryProperties = std::mem::transmute(f_mp);
+                
+                let work_format = if st.output_mode == 1 { vk::Format::R16G16B16A16_SFLOAT } else { vk::Format::A2B10G10R10_UNORM_PACK32 };
+                
                 for _ in 0..count {
                     let mut pi = vk::Image::null(); let _ = (ci)(dev, &vk::ImageCreateInfo { s_type: vk::StructureType::IMAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageCreateFlags::empty(), image_type: vk::ImageType::TYPE_2D, format: st.sdr_format, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 }, mip_levels: 1, array_layers: 1, samples: vk::SampleCountFlags::TYPE_1, tiling: vk::ImageTiling::OPTIMAL, usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC, sharing_mode: vk::SharingMode::EXCLUSIVE, queue_family_index_count: 0, p_queue_family_indices: std::ptr::null(), initial_layout: vk::ImageLayout::UNDEFINED }, std::ptr::null(), &mut pi);
-                    let mut wi = vk::Image::null(); let _ = (ci)(dev, &vk::ImageCreateInfo { s_type: vk::StructureType::IMAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageCreateFlags::empty(), image_type: vk::ImageType::TYPE_2D, format: vk::Format::A2B10G10R10_UNORM_PACK32, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 }, mip_levels: 1, array_layers: 1, samples: vk::SampleCountFlags::TYPE_1, tiling: vk::ImageTiling::OPTIMAL, usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, sharing_mode: vk::SharingMode::EXCLUSIVE, queue_family_index_count: 0, p_queue_family_indices: std::ptr::null(), initial_layout: vk::ImageLayout::UNDEFINED }, std::ptr::null(), &mut wi);
+                    let mut wi = vk::Image::null(); let _ = (ci)(dev, &vk::ImageCreateInfo { s_type: vk::StructureType::IMAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageCreateFlags::empty(), image_type: vk::ImageType::TYPE_2D, format: work_format, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 }, mip_levels: 1, array_layers: 1, samples: vk::SampleCountFlags::TYPE_1, tiling: vk::ImageTiling::OPTIMAL, usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, sharing_mode: vk::SharingMode::EXCLUSIVE, queue_family_index_count: 0, p_queue_family_indices: std::ptr::null(), initial_layout: vk::ImageLayout::UNDEFINED }, std::ptr::null(), &mut wi);
                     let mut mr_p = vk::MemoryRequirements::default(); (gimr)(dev, pi, &mut mr_p);
                     let mut mr_w = vk::MemoryRequirements::default(); (gimr)(dev, wi, &mut mr_w);
                     let mut mp = vk::PhysicalDeviceMemoryProperties::default(); (pfn_gpdmp)(c.pd, &mut mp);
@@ -697,7 +740,7 @@ unsafe extern "system" fn hook_get_swapchain_images_khr(dev: vk::Device, sc: vk:
                     let _ = (bim)(dev, pi, pm, 0); let _ = (bim)(dev, wi, wm, 0);
                     st.proxy_images.push(pi); st.proxy_mems.push(pm); st.work_images.push(wi); st.work_mems.push(wm);
                     let mut pv = vk::ImageView::null(); let _ = (civ)(dev, &vk::ImageViewCreateInfo { s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageViewCreateFlags::empty(), image: pi, view_type: vk::ImageViewType::TYPE_2D, format: st.sdr_format, components: vk::ComponentMapping::default(), subresource_range: vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 } }, std::ptr::null(), &mut pv);
-                    let mut wv = vk::ImageView::null(); let _ = (civ)(dev, &vk::ImageViewCreateInfo { s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageViewCreateFlags::empty(), image: wi, view_type: vk::ImageViewType::TYPE_2D, format: vk::Format::A2B10G10R10_UNORM_PACK32, components: vk::ComponentMapping::default(), subresource_range: vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 } }, std::ptr::null(), &mut wv);
+                    let mut wv = vk::ImageView::null(); let _ = (civ)(dev, &vk::ImageViewCreateInfo { s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageViewCreateFlags::empty(), image: wi, view_type: vk::ImageViewType::TYPE_2D, format: work_format, components: vk::ComponentMapping::default(), subresource_range: vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 } }, std::ptr::null(), &mut wv);
                     st.proxy_views.push(pv); st.work_views.push(wv);
                     
                     let mut sem = vk::Semaphore::null();
@@ -768,7 +811,7 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                             (cpb)(cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::MEMORY_WRITE, dst_access_mask: vk::AccessFlags::SHADER_READ, old_layout: vk::ImageLayout::PRESENT_SRC_KHR, new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.proxy_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::SHADER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::GENERAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }].as_ptr());
                             (cbp)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe);
                             (cbds)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe_layout, 0, 1, &st.desc_sets[ii], 0, std::ptr::null());
-                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 40, &PushConstants { 
+                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 44, &PushConstants { 
                                 max_lum: HDR_CONFIG.max_lum, 
                                 mid_lum: HDR_CONFIG.mid_lum, 
                                 sat: HDR_CONFIG.sat, 
@@ -779,6 +822,7 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 intensity: HDR_CONFIG.intensity,
                                 black_level: HDR_CONFIG.black_level,
                                 sdr_gain: HDR_CONFIG.sdr_gain,
+                                output_mode: st.output_mode,
                             } as *const _ as *const _);                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
                             let region = vk::ImageCopy { src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, src_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 } };
