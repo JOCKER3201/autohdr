@@ -24,12 +24,14 @@ Settings can be overridden via environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTOHDR_OUTPUT_FORMAT` | `pq` or `scrgb` | `pq` |
-| `AUTOHDR_MAX_LUMINANCE` | Peak brightness in nits | (Auto from EDID) |
-| `AUTOHDR_MID_LUMINANCE` | Target "Paper White" in nits | (Auto/Heuristic) |
-| `AUTOHDR_INTENSITY` | Intensity of HDR effect (0.0 - 1.0) | `1.0` |
-| `AUTOHDR_SDR_BRIGHTNESS` | Initial SDR nit level | `100.0` |
-| `AUTOHDR_VIBRANCE` | Perceptual color enhancement | `0.0` |
+| `AUTOHDR_OUTPUT_FORMAT` | Output encoding: `pq` or `scrgb` | `pq` |
+| `AUTOHDR_MAX_LUMINANCE` | Peak brightness of your display in nits | (Auto from EDID) |
+| `AUTOHDR_MID_LUMINANCE` | Target "Paper White" (mid-tones) in nits | (Auto/Heuristic) |
+| `AUTOHDR_SDR_BRIGHTNESS`| The base brightness of the SDR content (nits) | `100.0` |
+| `AUTOHDR_INTENSITY` | Strength of the HDR transformation (0.0 to 1.0) | `1.0` |
+| `AUTOHDR_SATURATION` | Global color saturation multiplier | `1.0` |
+| `AUTOHDR_VIBRANCE` | Perceptual color enhancement (preserves skin tones) | `0.0` |
+| `AUTOHDR_BLACK_LEVEL` | Fine-tune shadow depth / black floor lift | `0.0` |
 
 ## Technical Implementation Details
 
