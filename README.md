@@ -32,6 +32,7 @@ Settings can be overridden via environment variables:
 | `AUTOHDR_SATURATION` | Global color saturation multiplier | `1.0` |
 | `AUTOHDR_VIBRANCE` | Perceptual color enhancement (preserves skin tones) | `0.0` |
 | `AUTOHDR_BLACK_LEVEL` | Fine-tune shadow depth / black floor lift | `0.0` |
+| `AUTOHDR_RCAS` | AMD FidelityFX RCAS sharpening (0.0 to 1.0) | `0.0` |
 
 ## Technical Implementation Details
 

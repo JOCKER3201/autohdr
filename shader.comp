@@ -19,12 +19,53 @@ layout(push_constant) uniform PushConstants {
     float vibrance;           // Smart saturation multiplier
     uint  width;              // Image width
     uint  height;             // Image height
-    uint  _padding;           // Explicit padding for alignment
+    float rcas_strength;      // RCAS Sharpening strength (0.0 - 1.0)
     float intensity;          // HDR transformation intensity (0.0 - 1.0)
     float black_level;        // Shadow floor adjustment
     float sdr_gain;           // Initial SDR brightness multiplier
     uint  output_mode;        // 0 = PQ (10-bit), 1 = scRGB (16-bit float)
 } pc;
+
+// --- AMD FidelityFX RCAS Implementation ---
+vec3 FsrRcasF(vec2 uv) {
+    // RCAS is a robust contrast-adaptive sharpening filter.
+    // It operates on a 5-tap cross neighborhood.
+    // b d f
+    // h e g
+    // i j k
+    // We sample: e (center), b (up), d (left), f (right), h (down)
+    
+    vec3 e = texture(inputTexture, uv).rgb;
+    if (pc.rcas_strength <= 0.0) return e;
+
+    vec2 off = 1.0 / vec2(pc.width, pc.height);
+    vec3 b = texture(inputTexture, uv + vec2(0, -off.y)).rgb;
+    vec3 d = texture(inputTexture, uv + vec2(-off.x, 0)).rgb;
+    vec3 f = texture(inputTexture, uv + vec2(off.x, 0)).rgb;
+    vec3 h = texture(inputTexture, uv + vec2(0, off.y)).rgb;
+
+    // Luma: 0.25R + 0.5G + 0.25B (AMD's optimized luma)
+    float bL = b.g * 0.5 + (b.r + b.b) * 0.25;
+    float dL = d.g * 0.5 + (d.r + d.b) * 0.25;
+    float eL = e.g * 0.5 + (e.r + e.b) * 0.25;
+    float fL = f.g * 0.5 + (f.r + f.b) * 0.25;
+    float hL = h.g * 0.5 + (h.r + h.b) * 0.25;
+
+    // Soft min/max for ringing suppression
+    float mnL = min(min(bL, dL), min(min(fL, hL), eL));
+    float mxL = max(max(bL, dL), max(max(fL, hL), eL));
+
+    // Contrast-adaptive sharpening weight
+    // FSR_RCAS_LIMIT = 0.25 - (1/16) = 0.1875
+    float ampL = clamp(min(mnL, 2.0 - mxL) / mxL, 0.0, 0.1875);
+    
+    // We map 0.0-1.0 to the "stops" logic (0.0 stops = 1.0, higher stops = lower weight)
+    // For simplicity, we just use pc.rcas_strength as the weight multiplier.
+    float wL = ampL * pc.rcas_strength;
+
+    // Filter: (b+d+f+h)*wL + e normalized by 4*wL + 1
+    return ((b + d + f + h) * wL + e) / (4.0 * wL + 1.0);
+}
 
 // BT.709 to BT.2020 Color Space Conversion Matrix
 const mat3 Rec709_to_2020 = mat3(
@@ -69,12 +110,13 @@ void main() {
         if (pos.x >= pc.width || pos.y >= pc.height) continue;
 
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
-        vec4 sdr_sample = texture(inputTexture, uv);
+        vec3 sdr_rgb = FsrRcasF(uv);
+        float sdr_a = texture(inputTexture, uv).a;
 
         // --- HDR Reconstruction Pipeline (All calculations in FP32) ---
         
         // 1. Convert to Linear and apply initial gain
-        vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
+        vec3 color = srgb_to_linear(max(sdr_rgb, vec3(0.0)));
         color *= pc.sdr_gain;
 
         // 2. Map to BT.2020 Primaries
@@ -105,7 +147,7 @@ void main() {
                 -0.0728, -0.0083, 1.1188
             );
             vec3 color_rec709 = BT2020_to_Rec709 * color_linear;
-            imageStore(outputImage, pos, vec4(color_rec709 / 80.0, sdr_sample.a));
+            imageStore(outputImage, pos, vec4(color_rec709 / 80.0, sdr_a));
         } else {
             // mode: PQ (10-bit UNORM)
             // Color space: BT.2020 + SMPTE ST 2084 curve.
@@ -116,7 +158,7 @@ void main() {
             float d = dither_pattern[(pos.x % 2) + (pos.y % 2) * 2];
             pq += (d - 0.5) / 1023.0;
             
-            imageStore(outputImage, pos, vec4(pq, sdr_sample.a));
+            imageStore(outputImage, pos, vec4(pq, sdr_a));
         }
     }
 }
