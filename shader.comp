@@ -1,6 +1,4 @@
 #version 450
-#extension GL_NV_cooperative_matrix : enable
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
@@ -14,24 +12,23 @@ layout(push_constant) uniform PushConstants {
     float vibrance;
     uint width;
     uint height;
-    uint use_tensor;
+    uint unused_padding;
     float intensity;
     float black_level;
     float sdr_gain;
     uint output_mode; // 0 = PQ (10-bit), 1 = scRGB (16-bit float)
 } pc;
 
-const f16mat3 Rec709_to_2020_f16 = f16mat3(
-    0.6274hf, 0.0691hf, 0.0164hf,
-    0.3293hf, 0.9195hf, 0.0880hf,
-    0.0433hf, 0.0114hf, 0.8956hf
+const mat3 Rec709_to_2020 = mat3(
+    0.6274, 0.0691, 0.0164,
+    0.3293, 0.9195, 0.0880,
+    0.0433, 0.0114, 0.8956
 );
 
 vec3 srgb_to_linear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
 }
 
-// Full float32 precision for PQ
 vec3 linear_to_pq(vec3 c) {
     const float m1 = 2610.0 / 16384.0;
     const float m2 = 2523.0 / 4096.0 * 128.0;
@@ -50,14 +47,6 @@ vec3 apply_vibrance(vec3 color, float vibrance) {
     return mix(vec3(luma), color, 1.0 + vibrance * (1.0 - sat));
 }
 
-f16vec3 apply_vibrance_f16(f16vec3 color, float16_t vibrance) {
-    float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
-    float16_t max_color = max(color.r, max(color.g, color.b));
-    float16_t min_color = min(color.r, min(color.g, color.b));
-    float16_t sat = max_color - min_color;
-    return mix(f16vec3(luma), color, 1.0hf + vibrance * (1.0hf - sat));
-}
-
 void main() {
     uint idx = gl_LocalInvocationID.x;
     ivec2 tile_origin = ivec2(gl_WorkGroupID.xy) * 16;
@@ -69,39 +58,21 @@ void main() {
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
         vec4 sdr_sample = texture(inputTexture, uv);
 
-        vec3 color_linear;
-        if (pc.use_tensor == 1) {
-            f16vec3 color = f16vec3(srgb_to_linear(sdr_sample.rgb));
-            color *= float16_t(pc.sdr_gain);
-            color = Rec709_to_2020_f16 * color;
-            color = apply_vibrance_f16(color, float16_t(pc.vibrance));
-            
-            float16_t luma = dot(color, f16vec3(0.2627hf, 0.6780hf, 0.0593hf));
-            float16_t black_weight = pow(max(1.0hf - luma, 0.0hf), 64.0hf);
-            luma = max(0.0hf, luma + float16_t(pc.black_level) * black_weight * 0.01hf);
+        // All calculations in FP32 for maximum precision (32-bit depth)
+        vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
+        color *= pc.sdr_gain;
+        color = Rec709_to_2020 * color;
+        color = apply_vibrance(color, pc.vibrance);
 
-            float16_t target_luma = mix(luma * 100.0hf, luma * float16_t(pc.mid_lum) + pow(max(luma, 0.0hf), 3.0hf) * float16_t(pc.max_lum - pc.mid_lum), float16_t(pc.intensity));
-            f16vec3 hdr_res = (luma > 0.0001hf) ? color * (target_luma / luma) : color * float16_t(mix(100.0, pc.mid_lum, pc.intensity));
-            color_linear = vec3(hdr_res);
-        } else {
-            vec3 color = srgb_to_linear(max(sdr_sample.rgb, vec3(0.0)));
-            color *= pc.sdr_gain;
-            color = mat3(Rec709_to_2020_f16) * color;
-            color = apply_vibrance(color, pc.vibrance);
+        float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+        float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
+        luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
 
-            float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
-            float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
-            luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
-
-            float target_luma = mix(luma * 100.0, luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum), pc.intensity);
-            color_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_lum, pc.intensity);
-        }
+        float target_luma = mix(luma * 100.0, luma * pc.mid_lum + pow(max(luma, 0.0), 3.0) * (pc.max_lum - pc.mid_lum), pc.intensity);
+        vec3 color_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_lum, pc.intensity);
 
         if (pc.output_mode == 1) {
-            // scRGB: Linear sRGB (using BT.709 primaries), 1.0 = 80 nits.
-            // But usually scRGB expects 1.0 = 80 nits, and BT.2020 -> BT.709 conversion.
-            // Most Linux HDR implementations using scRGB (extended sRGB linear) expect linear BT.709.
-            // Convert BT.2020 back to BT.709 for scRGB
+            // scRGB: Linear sRGB (using BT.709 primaries), 1.0 = 80 nits
             const mat3 BT2020_to_Rec709 = mat3(
                 1.6605, -0.1246, -0.0182,
                 -0.5876, 1.1329, -0.1006,
@@ -110,7 +81,7 @@ void main() {
             vec3 color_rec709 = BT2020_to_Rec709 * color_linear;
             imageStore(outputImage, pos, vec4(color_rec709 / 80.0, sdr_sample.a));
         } else {
-            // PQ: BT.2020 + PQ curve
+            // PQ: BT.2020 + PQ curve (10-bit)
             vec3 pq = linear_to_pq(color_linear / 10000.0);
             
             // Improved Dithering in PQ space
