@@ -20,20 +20,33 @@ AutoHDR is designed to be invisible and automatic. It features:
 
 ## Configuration
 
-Settings can be overridden via environment variables:
+Settings can be managed via a configuration file. The layer searches for configuration in the following order:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AUTOHDR_OUTPUT_FORMAT` | Output encoding: `pq` or `scrgb` | `pq` |
-| `AUTOHDR_MAX_LUMINANCE` | Peak brightness of your display in nits | (Auto from EDID) |
-| `AUTOHDR_MID_LUMINANCE` | Target "Paper White" (mid-tones) in nits | (Auto/Heuristic) |
-| `AUTOHDR_SDR_BRIGHTNESS`| The base brightness of the SDR content (nits) | `100.0` |
-| `AUTOHDR_INTENSITY` | Strength of the HDR transformation (0.0 to 1.0) | `1.0` |
-| `AUTOHDR_SATURATION` | Global color saturation multiplier | `1.0` |
-| `AUTOHDR_VIBRANCE` | Perceptual color enhancement (preserves skin tones) | `0.0` |
-| `AUTOHDR_BLACK_LEVEL` | Fine-tune shadow depth / black floor lift | `0.0` |
-| `AUTOHDR_RCAS` | AMD FidelityFX RCAS sharpening (0.0 to 1.0) | `0.0` |
-| `AUTOHDR_FXAA` | Fast Approximate Anti-Aliasing (0.0 to 1.0) | `0.0` |
+1.  **`AUTOHDR_CONFIG` Environment Variable:** If set, this path is used exclusively.
+2.  **Process-Specific Config:** `~/.config/autohdr/[process_name].conf` (e.g., `vkcube.conf`).
+3.  **Global Config:** `~/.config/autohdr/autohdr.conf`.
+
+### Automatic Creation
+- If `autohdr.conf` does not exist, it is created with default values on the first run.
+- If a program is run with **`AUTOHDR_ENABLE=1`** and its process-specific config does not exist, the layer automatically creates it as a 1:1 copy of the current `autohdr.conf`.
+
+**Precedence:** Individual environment variables (starting with `AUTOHDR_`) always take precedence over the values found in any configuration file.
+
+### Available Settings
+
+| Variable / Config Key | Description | Default |
+|-----------------------|-------------|---------|
+| `AUTOHDR_CONFIG` | Custom path to the configuration file | None |
+| `AUTOHDR_OUTPUT_FORMAT` / `preferred_format` | Output encoding: `pq` or `scrgb` | `pq` |
+| `AUTOHDR_MAX_LUMINANCE` / `max_lum` | Peak brightness of your display in nits | (Auto from EDID) |
+| `AUTOHDR_MID_LUMINANCE` / `mid_lum` | Target "Paper White" (mid-tones) in nits | (Auto/Heuristic) |
+| `AUTOHDR_SDR_BRIGHTNESS`/ `sdr_brightness`| The base brightness of the SDR content (nits) | `100.0` |
+| `AUTOHDR_INTENSITY` / `intensity` | Strength of the HDR transformation (0.0 to 1.0) | `1.0` |
+| `AUTOHDR_SATURATION` / `sat` | Global color saturation multiplier | `1.0` |
+| `AUTOHDR_VIBRANCE` / `vibrance` | Perceptual color enhancement (preserves skin tones) | `0.0` |
+| `AUTOHDR_BLACK_LEVEL` / `black_level` | Fine-tune shadow depth / black floor lift | `0.0` |
+| `AUTOHDR_RCAS` / `rcas_strength` | AMD FidelityFX RCAS sharpening (0.0 to 1.0) | `0.0` |
+| `AUTOHDR_FXAA` / `fxaa_strength` | Fast Approximate Anti-Aliasing (0.0 to 1.0) | `0.0` |
 
 ## Technical Implementation Details
 

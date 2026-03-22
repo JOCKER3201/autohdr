@@ -4,7 +4,9 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 use std::sync::RwLock;
 use std::collections::HashMap;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
+use std::fs;
+use std::path::PathBuf;
 
 /*
  * AutoHDR Vulkan Layer
@@ -46,11 +48,25 @@ lazy_static::lazy_static! {
     #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)] enum OutputFormat { PQ, ScRGB }
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)] 
+pub enum OutputFormat { 
+    #[serde(rename = "pq")] PQ, 
+    #[serde(rename = "scrgb")] ScRGB 
+}
 
+#[derive(Serialize, Deserialize, Clone)]
 struct HdrConfig { 
-    pub max_lum: f32, pub mid_lum: f32, pub sat: f32, pub vibrance: f32, 
-    pub intensity: f32, pub black_level: f32, pub rcas_strength: f32, pub fxaa_strength: f32, pub sdr_gain: f32,
+    pub max_lum: f32, 
+    pub mid_lum: f32, 
+    pub sat: f32, 
+    pub vibrance: f32, 
+    pub intensity: f32, 
+    pub black_level: f32, 
+    pub rcas_strength: f32, 
+    pub fxaa_strength: f32, 
+    pub sdr_brightness: f32,
+    #[serde(skip)]
+    pub sdr_gain: f32,
     pub preferred_format: OutputFormat
 }
 
@@ -150,27 +166,107 @@ impl HdrConfig {
     fn from_env() -> Self {
         let (sys_max_lum, sys_mid_lum, monitor_name) = Self::detect_system_config();
         
-        let max_lum = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()).or(sys_max_lum).unwrap_or(1000.0);
-        let mid_lum_default = sys_mid_lum.unwrap_or(max_lum * 0.3);
-        let mid_lum = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(mid_lum_default);
-        let sat = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let vibrance = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let intensity = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let black_level = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let rcas_strength = std::env::var("AUTOHDR_RCAS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let fxaa_strength = std::env::var("AUTOHDR_FXAA").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-        let sdr_brightness = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()).or(sys_mid_lum).unwrap_or(100.0);
-        let sdr_gain = sdr_brightness / 100.0;
+        // 1. Definiujemy domyślne wartości na podstawie detekcji systemu
+        let default_max_lum = sys_max_lum.unwrap_or(1000.0);
+        let default_mid_lum = sys_mid_lum.unwrap_or(default_max_lum * 0.3);
+        let default_sdr_brightness = sys_mid_lum.unwrap_or(100.0);
         
-        let preferred_format = match std::env::var("AUTOHDR_OUTPUT_FORMAT").unwrap_or_default().to_lowercase().as_str() {
-            "scrgb" => OutputFormat::ScRGB,
-            _ => OutputFormat::PQ,
+        let mut config = Self {
+            max_lum: default_max_lum,
+            mid_lum: default_mid_lum,
+            sat: 1.0,
+            vibrance: 0.0,
+            intensity: 1.0,
+            black_level: 0.0,
+            rcas_strength: 0.0,
+            fxaa_strength: 0.0,
+            sdr_brightness: default_sdr_brightness,
+            sdr_gain: default_sdr_brightness / 100.0,
+            preferred_format: OutputFormat::PQ,
         };
 
-        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} Gain={} Format={:?}", 
-            monitor_name, max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, fxaa_strength, sdr_gain, preferred_format);
+        // 2. Wyznaczamy ścieżki
+        let config_dir = dirs::config_dir().map(|p| p.join("autohdr"));
+        let global_config_path = config_dir.as_ref().map(|d| d.join("autohdr.conf"));
+        let mut proc_config_path = None;
+        
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_name) = exe_path.file_name().and_then(|n| n.to_str()) {
+                proc_config_path = config_dir.as_ref().map(|d| d.join(format!("{}.conf", exe_name)));
+            }
+        }
+
+        // Automatyczne tworzenie plików konfiguracyjnych
+        if let (Some(global_path), Some(proc_path)) = (&global_config_path, &proc_config_path) {
+            // Najpierw upewnij się, że autohdr.conf istnieje
+            if !global_path.exists() {
+                if let Some(parent) = global_path.parent() { let _ = fs::create_dir_all(parent); }
+                if let Ok(toml_str) = toml::to_string_pretty(&config) {
+                    let _ = fs::write(global_path, toml_str);
+                    eprintln!("[AutoHDR] Created default global config at {:?}", global_path);
+                }
+            }
             
-        Self { max_lum, mid_lum, sat, vibrance, intensity, black_level, rcas_strength, fxaa_strength, sdr_gain, preferred_format }
+            // Jeśli AUTOHDR_ENABLE=1 i nie ma pliku procesu, skopiuj autohdr.conf
+            if std::env::var("AUTOHDR_ENABLE").ok() == Some("1".to_string()) && !proc_path.exists() {
+                if let Ok(_) = fs::copy(global_path, proc_path) {
+                    eprintln!("[AutoHDR] Created process-specific config by copying global config to {:?}", proc_path);
+                }
+            }
+        }
+
+        // Wybór pliku do wczytania (priorytety)
+        let mut selected_config_path = None;
+
+        // 1. AUTOHDR_CONFIG
+        if let Ok(path) = std::env::var("AUTOHDR_CONFIG") {
+            selected_config_path = Some(PathBuf::from(path));
+        }
+        // 2. [process].conf
+        if selected_config_path.is_none() {
+            if let Some(ref path) = proc_config_path {
+                if path.exists() { selected_config_path = Some(path.clone()); }
+            }
+        }
+        // 3. autohdr.conf
+        if selected_config_path.is_none() {
+            selected_config_path = global_config_path;
+        }
+
+        if let Some(path) = selected_config_path {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(loaded) = toml::from_str::<Self>(&content) {
+                    config = loaded;
+                    eprintln!("[AutoHDR] Loaded config from {:?}", path);
+                }
+            }
+        }
+
+        // 3. Zmienne środowiskowe mają najwyższy priorytet
+        if let Some(v) = std::env::var("AUTOHDR_MAX_LUMINANCE").ok().and_then(|v| v.parse().ok()) { config.max_lum = v; }
+        if let Some(v) = std::env::var("AUTOHDR_MID_LUMINANCE").ok().and_then(|v| v.parse().ok()) { config.mid_lum = v; }
+        if let Some(v) = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()) { config.sat = v; }
+        if let Some(v) = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()) { config.vibrance = v; }
+        if let Some(v) = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()) { config.intensity = v; }
+        if let Some(v) = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()) { config.black_level = v; }
+        if let Some(v) = std::env::var("AUTOHDR_RCAS").ok().and_then(|v| v.parse().ok()) { config.rcas_strength = v; }
+        if let Some(v) = std::env::var("AUTOHDR_FXAA").ok().and_then(|v| v.parse().ok()) { config.fxaa_strength = v; }
+        if let Some(v) = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()) { config.sdr_brightness = v; }
+        
+        if let Ok(v) = std::env::var("AUTOHDR_OUTPUT_FORMAT") {
+             config.preferred_format = match v.to_lowercase().as_str() {
+                "scrgb" => OutputFormat::ScRGB,
+                _ => OutputFormat::PQ,
+            };
+        }
+
+        // Przeliczamy gain po nałożeniu wszystkich ustawień
+        config.sdr_gain = config.sdr_brightness / 100.0;
+
+        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} SDR={} Format={:?}", 
+            monitor_name, config.max_lum, config.mid_lum, config.sat, config.vibrance, config.intensity, config.black_level, config.rcas_strength, config.fxaa_strength, config.sdr_brightness, config.preferred_format);
+            
+        config
     }
 }
 
