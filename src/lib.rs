@@ -166,10 +166,10 @@ impl HdrConfig {
     fn from_env() -> Self {
         let (sys_max_lum, sys_mid_lum, monitor_name) = Self::detect_system_config();
         
-        // 1. Definiujemy domyślne wartości na podstawie detekcji systemu
+        // 1. Definiujemy domyślne wartości
         let default_max_lum = sys_max_lum.unwrap_or(1000.0);
         let default_mid_lum = sys_mid_lum.unwrap_or(default_max_lum * 0.3);
-        let default_sdr_brightness = sys_mid_lum.unwrap_or(100.0);
+        let default_sdr_brightness = 200.0;
         
         let mut config = Self {
             max_lum: default_max_lum,
