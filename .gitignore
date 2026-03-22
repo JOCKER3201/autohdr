@@ -1,0 +1,5 @@
+target/
+autohdr-gui/target/
+build/
+*.spv
+VkLayer_hdr_tensor.json
