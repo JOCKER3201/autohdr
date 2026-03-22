@@ -171,12 +171,8 @@ void main() {
         float black_weight = pow(max(1.0 - luma, 0.0), 64.0);
         luma = max(0.0, luma + pc.black_level * black_weight * 0.01);
 
-        // Contrast-aware luminance expansion with smoother highlight roll-off
-        float target_luma = mix(luma * 100.0, luma * pc.mid_luminance + pow(max(luma, 0.0), 2.2) * (pc.max_luminance - pc.mid_luminance), pc.intensity);
-        
-        // Prevent extreme peaks that cause "blown out" look
-        target_luma = min(target_luma, pc.max_luminance);
-        
+        // Contrast-aware luminance expansion
+        float target_luma = mix(luma * 100.0, luma * pc.mid_luminance + pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance), pc.intensity);
         vec3 color_linear = (luma > 0.0001) ? color * (target_luma / luma) : color * mix(100.0, pc.mid_luminance, pc.intensity);
 
         // --- Final Output Encoding ---
