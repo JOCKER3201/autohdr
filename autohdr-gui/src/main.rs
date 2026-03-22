@@ -6,13 +6,29 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::cell::RefCell;
 
+#[derive(Deserialize)]
+struct KScreenDoctorOutput { outputs: Vec<KScreenOutput> }
+#[derive(Deserialize)]
+struct KScreenOutput { 
+    name: String, 
+    primary: bool, 
+    #[serde(rename = "maxBrightnessOverride")] max_brightness_override: Option<f32>, 
+    #[serde(rename = "maxBrightness")] max_brightness: Option<f32>,
+    #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum OutputFormat {
     #[serde(rename = "pq")] PQ,
     #[serde(rename = "scrgb")] ScRGB,
 }
 
+impl Default for OutputFormat {
+    fn default() -> Self { OutputFormat::PQ }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 struct HdrConfig {
     pub max_lum: f32,
     pub mid_lum: f32,
@@ -24,6 +40,116 @@ struct HdrConfig {
     pub fxaa_strength: f32,
     pub sdr_brightness: f32,
     pub preferred_format: OutputFormat,
+}
+
+impl HdrConfig {
+    fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
+        let drm_dir = "/sys/class/drm";
+        if let Ok(entries) = std::fs::read_dir(drm_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.contains(connector) && name.contains("card") {
+                    let edid_path = entry.path().join("edid");
+                    if let Ok(edid) = std::fs::read(edid_path) {
+                        if edid.len() >= 128 {
+                            let extensions = edid[126] as usize;
+                            for ext in 1..=extensions {
+                                let block_start = ext * 128;
+                                if edid.len() < block_start + 128 { break; }
+                                let block = &edid[block_start..block_start + 128];
+                                if block[0] == 0x02 { // CEA-861 Extension
+                                    let d_start = block[2] as usize;
+                                    let mut i = 4;
+                                    while i < d_start && i < 127 {
+                                        let tag = (block[i] & 0xE0) >> 5;
+                                        let len = (block[i] & 0x1F) as usize;
+                                        if tag == 0x07 && len >= 3 {
+                                            if block[i+1] == 0x06 {
+                                                let mut max_lum = None;
+                                                let mut avg_lum = None;
+                                                if len >= 4 {
+                                                    let v = block[i+4]; 
+                                                    if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
+                                                }
+                                                if len >= 5 {
+                                                    let v = block[i+5];
+                                                    if v > 0 { avg_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
+                                                }
+                                                return (max_lum, avg_lum);
+                                            }
+                                        }
+                                        i += 1 + len;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (None, None)
+    }
+
+    fn detect_system_config() -> (Option<f32>, Option<f32>) {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let mut connector_name = String::new();
+        let mut sys_max_lum = None;
+        let mut sys_sdr_brightness = None;
+
+        if desktop.contains("kde") {
+            if let Ok(output) = std::process::Command::new("kscreen-doctor").arg("-j").output() {
+                if let Ok(data) = serde_json::from_slice::<KScreenDoctorOutput>(&output.stdout) {
+                    if let Some(primary) = data.outputs.into_iter().find(|o| o.primary) {
+                        connector_name = primary.name;
+                        sys_max_lum = primary.max_brightness_override.or(primary.max_brightness);
+                        sys_sdr_brightness = primary.sdr_brightness;
+                    }
+                }
+            }
+        } else if desktop.contains("gnome") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = format!("{}/.config/monitors.xml", home);
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Some(pos) = content.find("<primary>yes</primary>") {
+                    let start = content[..pos].rfind("<logicalmonitor>").unwrap_or(0);
+                    let end = content[pos..].find("</logicalmonitor>").map(|e| pos + e).unwrap_or(content.len());
+                    let block = &content[start..end];
+                    if let Some(c_start) = block.find("<connector>") {
+                        if let Some(c_end) = block[c_start..].find("</connector>") {
+                            connector_name = block[c_start + 11..c_start + c_end].to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        if !connector_name.is_empty() {
+            let (edid_max, edid_avg) = Self::get_edid_luminance(&connector_name);
+            return (sys_max_lum.or(edid_max), sys_sdr_brightness.or(edid_avg));
+        }
+        (None, None)
+    }
+}
+
+impl Default for HdrConfig {
+    fn default() -> Self {
+        let (sys_max, sys_mid) = Self::detect_system_config();
+        let max_lum = sys_max.unwrap_or(1000.0);
+        let mid_lum = sys_mid.unwrap_or(max_lum * 0.3);
+
+        Self {
+            max_lum,
+            mid_lum,
+            sat: 1.0,
+            vibrance: 0.0,
+            intensity: 1.0,
+            black_level: 0.0,
+            rcas_strength: 0.0,
+            fxaa_strength: 0.0,
+            sdr_brightness: 200.0,
+            preferred_format: OutputFormat::PQ,
+        }
+    }
 }
 
 struct AppState {
@@ -240,25 +366,67 @@ fn build_ui(app: &gtk::Application) {
         move |_| {
             let mut st = state.borrow_mut();
             if let Some(ref path) = st.current_file {
-                let new_config = HdrConfig {
-                    max_lum: s_max_lum.value() as f32,
-                    mid_lum: s_mid_lum.value() as f32,
-                    sat: s_sat.value() as f32,
-                    vibrance: s_vib.value() as f32,
-                    intensity: s_int.value() as f32,
-                    black_level: s_black.value() as f32,
-                    rcas_strength: s_rcas.value() as f32,
-                    fxaa_strength: s_fxaa.value() as f32,
-                    sdr_brightness: s_sdr.value() as f32,
-                    preferred_format: if format_dropdown.selected() == 0 { OutputFormat::PQ } else { OutputFormat::ScRGB },
-                };
-                
-                if let Ok(toml_str) = toml::to_string_pretty(&new_config) {
-                    if let Ok(_) = fs::write(path, toml_str) {
-                        println!("Saved config to {:?}", path);
+                let content = fs::read_to_string(path).unwrap_or_default();
+                let mut doc = content.parse::<toml_edit::DocumentMut>().unwrap_or_default();
+
+                let settings = [
+                    ("max_lum", s_max_lum.value() as f32 as f64),
+                    ("mid_lum", s_mid_lum.value() as f32 as f64),
+                    ("sat", s_sat.value() as f32 as f64),
+                    ("vibrance", s_vib.value() as f32 as f64),
+                    ("intensity", s_int.value() as f32 as f64),
+                    ("black_level", s_black.value() as f32 as f64),
+                    ("rcas_strength", s_rcas.value() as f32 as f64),
+                    ("fxaa_strength", s_fxaa.value() as f32 as f64),
+                    ("sdr_brightness", s_sdr.value() as f32 as f64),
+                ];
+
+                let ORDER = [
+                    "max_lum", "mid_lum", "sat", "vibrance", "intensity", 
+                    "black_level", "rcas_strength", "fxaa_strength", 
+                    "sdr_brightness", "preferred_format"
+                ];
+
+                for (key, val) in settings {
+                    doc[key] = toml_edit::value(val);
+                }
+                doc["preferred_format"] = toml_edit::value(if format_dropdown.selected() == 0 { "pq" } else { "scrgb" });
+
+                // Ensure order for newly added keys
+                let root = doc.as_table_mut();
+                for i in 0..ORDER.len() {
+                    let key = ORDER[i];
+                    if root.contains_key(key) {
+                        // If it's already there, we might want to move it to maintain relative order 
+                        // only if it was JUST added (but toml_edit keeps existing ones).
+                        // To keep it simple and fulfill "appear in the place they default to":
+                        // we can remove and re-insert in order, but that loses comments.
+                        // Instead, let's only fix order for keys that are not at the right relative spot.
                     }
                 }
-                st.current_config = new_config;
+                
+                // Better approach: create a new ordered document but copy comments from old one? 
+                // No, toml_edit is better at this. Let's use the property that 
+                // if we want elements to appear in order, we should insert them in order if missing.
+                
+                let mut final_doc = toml_edit::DocumentMut::new();
+                for key in ORDER {
+                    if let Some(v) = root.remove(key) {
+                        final_doc[key] = v;
+                    }
+                }
+                // Append anything else that was in the file (like user custom stuff)
+                for (k, v) in root.iter() {
+                    final_doc[k] = v.clone();
+                }
+
+                if let Ok(_) = fs::write(path, final_doc.to_string()) {
+                    println!("Saved config to {:?}", path);
+                }
+                
+                if let Ok(config) = toml::from_str::<HdrConfig>(&final_doc.to_string()) {
+                    st.current_config = config;
+                }
             }
         }
     });

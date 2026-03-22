@@ -48,22 +48,27 @@ lazy_static::lazy_static! {
     #[serde(rename = "sdrBrightness")] sdr_brightness: Option<f32> 
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)] 
-pub enum OutputFormat { 
-    #[serde(rename = "pq")] PQ, 
-    #[serde(rename = "scrgb")] ScRGB 
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub enum OutputFormat {
+    #[serde(rename = "pq")] PQ,
+    #[serde(rename = "scrgb")] ScRGB
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self { OutputFormat::PQ }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct HdrConfig { 
-    pub max_lum: f32, 
-    pub mid_lum: f32, 
-    pub sat: f32, 
-    pub vibrance: f32, 
-    pub intensity: f32, 
-    pub black_level: f32, 
-    pub rcas_strength: f32, 
-    pub fxaa_strength: f32, 
+#[serde(default)]
+struct HdrConfig {
+    pub max_lum: f32,
+    pub mid_lum: f32,
+    pub sat: f32,
+    pub vibrance: f32,
+    pub intensity: f32,
+    pub black_level: f32,
+    pub rcas_strength: f32,
+    pub fxaa_strength: f32,
     pub sdr_brightness: f32,
     #[serde(skip)]
     pub sdr_gain: f32,
@@ -76,6 +81,26 @@ struct HdrConfig {
     pub frame_counter: u64,
 }
 
+impl Default for HdrConfig {
+    fn default() -> Self {
+        Self {
+            max_lum: 1000.0,
+            mid_lum: 300.0,
+            sat: 1.0,
+            vibrance: 0.0,
+            intensity: 1.0,
+            black_level: 0.0,
+            rcas_strength: 0.0,
+            fxaa_strength: 0.0,
+            sdr_brightness: 200.0,
+            sdr_gain: 2.0,
+            preferred_format: OutputFormat::PQ,
+            config_path: None,
+            last_mtime: None,
+            frame_counter: 0,
+        }
+    }
+}
 impl HdrConfig {
     /// Attempts to read peak and average luminance from the monitor's EDID via sysfs.
     fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
