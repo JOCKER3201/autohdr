@@ -45,6 +45,23 @@ configure_file(
   install_tag: 'runtime'
 )
 
+# Budujemy i instalujemy aplikację GUI
+gui_manifest_path = meson.project_source_root() / 'autohdr-gui' / 'Cargo.toml'
+gui_bin = custom_target(
+  'autohdr_gui_bin',
+  build_by_default: true,
+  output: 'autohdr-gui',
+  console: true,
+  command: [
+    'sh', '-c',
+    'CARGO_TARGET_DIR="$1" cargo build --release --manifest-path "$2" && cp "$1/release/autohdr-gui" "$3"',
+    '--',
+    cargo_target_dir, gui_manifest_path, '@OUTPUT@'
+  ],
+  install: true,
+  install_dir: get_option('bindir')
+)
+
 # Zmieniamy nazwę zainstalowanego pliku na właściwą
 meson.add_install_script('sh', '-c', 'mv "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor_install.json" "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor.json"',
   '--', get_option('datadir') / 'vulkan' / 'implicit_layer.d'
