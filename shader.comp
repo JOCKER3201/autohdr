@@ -132,11 +132,17 @@ vec3 linear_to_pq(vec3 c) {
 
 // Perceptual Vibrance adjustment
 vec3 apply_vibrance(vec3 color, float vibrance) {
-    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
     float max_c = max(color.r, max(color.g, color.b));
     float min_c = min(color.r, min(color.g, color.b));
     float sat = max_c - min_c;
     return mix(vec3(luma), color, 1.0 + vibrance * (1.0 - sat));
+}
+
+// Global Saturation adjustment
+vec3 apply_saturation(vec3 color, float saturation) {
+    float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+    return mix(vec3(luma), color, saturation);
 }
 
 void main() {
@@ -153,7 +159,7 @@ void main() {
         float sdr_a = texture(inputTexture, uv).a;
 
         // --- HDR Reconstruction Pipeline (All calculations in FP32) ---
-        
+
         // 1. Convert to Linear and apply initial gain
         vec3 color = srgb_to_linear(max(sdr_rgb, vec3(0.0)));
         color *= pc.sdr_gain;
@@ -163,9 +169,11 @@ void main() {
 
         // 3. Apply Vibrance/Saturation
         color = apply_vibrance(color, pc.vibrance);
+        color = apply_saturation(color, pc.saturation);
 
         // 4. Perceptual HDR Transformation (Original 28af886 logic + intensity fix)
         float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+
         float boost = pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance);
         float target_luma = luma * pc.mid_luminance + (boost * pc.intensity);
         
