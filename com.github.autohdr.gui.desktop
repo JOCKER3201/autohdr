@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=AutoHDR Configuration
+Comment=Adjust HDR reconstruction parameters in real-time
+Exec=autohdr-gui
+Icon=video-display
+Terminal=false
+Type=Application
+Categories=Settings;Graphics;HardwareSettings;
+Keywords=hdr;vulkan;graphics;config;
+StartupNotify=true

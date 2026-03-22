@@ -62,6 +62,12 @@ gui_bin = custom_target(
   install_dir: get_option('bindir')
 )
 
+# Instalujemy plik .desktop
+install_data(
+  'com.github.autohdr.gui.desktop',
+  install_dir: get_option('datadir') / 'applications'
+)
+
 # Zmieniamy nazwę zainstalowanego pliku na właściwą
 meson.add_install_script('sh', '-c', 'mv "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor_install.json" "$MESON_INSTALL_DESTDIR_PREFIX/$1/VkLayer_hdr_tensor.json"',
   '--', get_option('datadir') / 'vulkan' / 'implicit_layer.d'
