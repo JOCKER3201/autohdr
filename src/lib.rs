@@ -36,7 +36,7 @@ lazy_static::lazy_static! {
     static ref SURFACE_NATIVE_HDR: RwLock<HashMap<vk::SurfaceKHR, bool>> = RwLock::new(HashMap::new());
     static ref GLOBAL_GIPA: RwLock<Option<vk::PFN_vkGetInstanceProcAddr>> = RwLock::new(None);
     static ref GLOBAL_INSTANCE: RwLock<Option<vk::Instance>> = RwLock::new(None);
-    static ref HDR_CONFIG: HdrConfig = HdrConfig::from_env();
+    static ref HDR_CONFIG: RwLock<HdrConfig> = RwLock::new(HdrConfig::from_env());
 }
 
 #[derive(Deserialize)] struct KScreenDoctorOutput { outputs: Vec<KScreenOutput> }
@@ -67,7 +67,13 @@ struct HdrConfig {
     pub sdr_brightness: f32,
     #[serde(skip)]
     pub sdr_gain: f32,
-    pub preferred_format: OutputFormat
+    pub preferred_format: OutputFormat,
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
+    #[serde(skip)]
+    pub last_mtime: Option<std::time::SystemTime>,
+    #[serde(skip)]
+    pub frame_counter: u64,
 }
 
 impl HdrConfig {
@@ -183,6 +189,9 @@ impl HdrConfig {
             sdr_brightness: default_sdr_brightness,
             sdr_gain: default_sdr_brightness / 100.0,
             preferred_format: OutputFormat::PQ,
+            config_path: None,
+            last_mtime: None,
+            frame_counter: 0,
         };
 
         // 2. Wyznaczamy ścieżki
@@ -195,7 +204,7 @@ impl HdrConfig {
         if let Ok(cmdline) = std::fs::read("/proc/self/cmdline") {
             for arg_bytes in cmdline.split(|&b| b == 0) {
                 if let Ok(arg) = std::str::from_utf8(arg_bytes) {
-                    let arg_norm = arg.replace('\\', "/"); // Konwersja ścieżki Win -> Linux
+                    let arg_norm = arg.replace('\\', "/"); 
                     if arg_norm.to_lowercase().ends_with(".exe") {
                         if let Some(name) = PathBuf::from(arg_norm).file_name() {
                             proc_name = Some(name.to_string_lossy().to_string());
@@ -211,11 +220,14 @@ impl HdrConfig {
             if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
                 for line in maps.lines() {
                     if line.to_lowercase().contains(".exe") {
-                        let path_candidate = line.splitn(6, ' ').last().unwrap_or("").trim().replace('\\', "/");
-                        if path_candidate.to_lowercase().ends_with(".exe") {
-                            if let Some(name) = PathBuf::from(path_candidate).file_name() {
-                                proc_name = Some(name.to_string_lossy().to_string());
-                                break;
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 6 {
+                            let path_candidate = line.splitn(6, ' ').last().unwrap_or("").trim().replace('\\', "/");
+                            if path_candidate.to_lowercase().ends_with(".exe") {
+                                if let Some(name) = PathBuf::from(path_candidate).file_name() {
+                                    proc_name = Some(name.to_string_lossy().to_string());
+                                    break;
+                                }
                             }
                         }
                     }
@@ -230,7 +242,7 @@ impl HdrConfig {
                 .ok();
         }
 
-        // Czarna lista procesów, które nie powinny tworzyć własnych plików konfiguracyjnych
+        // Czarna lista
         let blacklist = ["explorer.exe", "services.exe", "svchost.exe", "winedevice.exe", "plugplay.exe", "tabtip.exe", "rpcss.exe", "wineboot.exe"];
         let is_blacklisted = proc_name.as_ref().map(|n| blacklist.contains(&n.to_lowercase().as_str())).unwrap_or(false);
 
@@ -279,6 +291,8 @@ impl HdrConfig {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(loaded) = toml::from_str::<Self>(&content) {
                     config = loaded;
+                    config.config_path = Some(path.clone());
+                    config.last_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
                     eprintln!("[AutoHDR] Loaded config from {:?}", path);
                 }
             }
@@ -309,6 +323,38 @@ impl HdrConfig {
             monitor_name, config.max_lum, config.mid_lum, config.sat, config.vibrance, config.intensity, config.black_level, config.rcas_strength, config.fxaa_strength, config.sdr_brightness, config.preferred_format);
             
         config
+    }
+
+    fn reload_if_needed(&mut self) {
+        self.frame_counter += 1;
+        if self.frame_counter % 60 != 0 { return; } 
+
+        if let Some(ref path) = self.config_path {
+            if let Ok(metadata) = fs::metadata(path) {
+                if let Ok(mtime) = metadata.modified() {
+                    if Some(mtime) != self.last_mtime {
+                        if let Ok(content) = fs::read_to_string(path) {
+                            if let Ok(loaded) = toml::from_str::<Self>(&content) {
+                                self.max_lum = loaded.max_lum;
+                                self.mid_lum = loaded.mid_lum;
+                                self.sat = loaded.sat;
+                                self.vibrance = loaded.vibrance;
+                                self.intensity = loaded.intensity;
+                                self.black_level = loaded.black_level;
+                                self.rcas_strength = loaded.rcas_strength;
+                                self.fxaa_strength = loaded.fxaa_strength;
+                                self.sdr_brightness = loaded.sdr_brightness;
+                                self.sdr_gain = self.sdr_brightness / 100.0;
+                                self.preferred_format = loaded.preferred_format;
+                                self.last_mtime = Some(mtime);
+                                eprintln!("[AutoHDR] Config reloaded: Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} SDR={}", 
+                                    self.max_lum, self.mid_lum, self.sat, self.vibrance, self.intensity, self.black_level, self.rcas_strength, self.fxaa_strength, self.sdr_brightness);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -693,7 +739,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
     let mut formats = vec![vk::SurfaceFormatKHR::default(); count as usize];
     let _ = (real_get_formats)(c.pd, (*p_ci).surface, &mut count, formats.as_mut_ptr());
 
-    let mut requested_format = HDR_CONFIG.preferred_format;
+    let mut requested_format = HDR_CONFIG.read().unwrap().preferred_format;
     let mut output_mode = if requested_format == OutputFormat::ScRGB { 1 } else { 0 };
     
     let mut bypass = false;
@@ -887,6 +933,9 @@ unsafe extern "system" fn hook_acquire_next_image_khr(dev: vk::Device, sc: vk::S
 }
 
 unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::PresentInfoKHR) -> vk::Result {
+    // Hot-reload config
+    HDR_CONFIG.write().unwrap().reload_if_needed();
+
     let (dev, qfi) = QUEUE_TO_DEVICE.read().unwrap().get(&q).copied().unwrap_or((vk::Device::null(), 0));
     if dev != vk::Device::null() {
         let ctx_map = DEVICE_CONTEXTS.read().unwrap();
@@ -917,20 +966,22 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                             (cpb)(cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::MEMORY_WRITE, dst_access_mask: vk::AccessFlags::SHADER_READ, old_layout: vk::ImageLayout::PRESENT_SRC_KHR, new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.proxy_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::SHADER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::GENERAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }].as_ptr());
                             (cbp)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe);
                             (cbds)(cb, vk::PipelineBindPoint::COMPUTE, st.pipe_layout, 0, 1, &st.desc_sets[ii], 0, std::ptr::null());
-                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 44, &PushConstants { 
-                                max_lum: HDR_CONFIG.max_lum, 
-                                mid_lum: HDR_CONFIG.mid_lum, 
-                                sat: HDR_CONFIG.sat, 
-                                vibrance: HDR_CONFIG.vibrance,
+                            let config = HDR_CONFIG.read().unwrap();
+                            (cpc)(cb, st.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, 48, &PushConstants { 
+                                max_lum: config.max_lum, 
+                                mid_lum: config.mid_lum, 
+                                sat: config.sat, 
+                                vibrance: config.vibrance,
                                 width: st.width, 
                                 height: st.height, 
-                                rcas_strength: HDR_CONFIG.rcas_strength,
-                                fxaa_strength: HDR_CONFIG.fxaa_strength,
-                                intensity: HDR_CONFIG.intensity,
-                                black_level: HDR_CONFIG.black_level,
-                                sdr_gain: HDR_CONFIG.sdr_gain,
-                                output_mode: st.output_mode,
-                            } as *const _ as *const _);                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
+                                rcas_strength: config.rcas_strength,
+                                fxaa_strength: config.fxaa_strength,
+                                intensity: config.intensity,
+                                black_level: config.black_level,
+                                sdr_gain: config.sdr_gain,
+                                output_mode: config.preferred_format as u32,
+                            } as *const _ as *const _);
+                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
                             let region = vk::ImageCopy { src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, src_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 } };
                             (cci)(cb, st.work_images[ii], vk::ImageLayout::TRANSFER_SRC_OPTIMAL, st.real_images[ii], vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1, &region);
