@@ -249,7 +249,7 @@ fn build_ui(app: &gtk::Application) {
     let s_mid_lum = create_row(&grid, 1, "Mid Luminance (nits)", 10.0, 1000.0, 5.0, 300.0);
     let s_sat = create_row(&grid, 2, "Saturation", 0.0, 2.0, 0.05, 1.0);
     let s_vib = create_row(&grid, 3, "Vibrance", 0.0, 2.0, 0.05, 0.0);
-    let s_int = create_row(&grid, 4, "Intensity", 0.0, 1.0, 0.05, 1.0);
+    let s_int = create_row(&grid, 4, "Intensity", 0.0, 10.0, 0.05, 1.0);
     let s_black = create_row(&grid, 5, "Black Level", -1.0, 1.0, 0.05, 0.0);
     let s_rcas = create_row(&grid, 6, "RCAS Sharpening", 0.0, 1.0, 0.05, 0.0);
     let s_fxaa = create_row(&grid, 7, "FXAA Anti-Aliasing", 0.0, 1.0, 0.05, 0.0);
