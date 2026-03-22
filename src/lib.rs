@@ -176,7 +176,7 @@ impl HdrConfig {
             mid_lum: default_mid_lum,
             sat: 1.0,
             vibrance: 0.0,
-            intensity: 1.0,
+            intensity: 0.8, // Reduced default intensity
             black_level: 0.0,
             rcas_strength: 0.0,
             fxaa_strength: 0.0,
@@ -188,11 +188,72 @@ impl HdrConfig {
         // 2. Wyznaczamy ścieżki
         let config_dir = dirs::config_dir().map(|p| p.join("autohdr"));
         let global_config_path = config_dir.as_ref().map(|d| d.join("autohdr.conf"));
-        let mut proc_config_path = None;
         
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_name) = exe_path.file_name().and_then(|n| n.to_str()) {
-                proc_config_path = config_dir.as_ref().map(|d| d.join(format!("{}.conf", exe_name)));
+        // Prawdziwe wykrywanie aplikacji Windowsowej (dla Protona/Wine)
+        let mut proc_config_path = None;
+        let mut win_exe_path = None;
+
+        // 1. Przeszukaj cmdline
+        if let Ok(cmdline) = std::fs::read("/proc/self/cmdline") {
+            for arg_bytes in cmdline.split(|&b| b == 0) {
+                if let Ok(arg) = std::str::from_utf8(arg_bytes) {
+                    let low_arg = arg.to_lowercase();
+                    if low_arg.ends_with(".exe") {
+                        // Obsługa ścieżek Linuxowych i próba konwersji
+                        if arg.starts_with('/') {
+                            win_exe_path = Some(PathBuf::from(arg));
+                            break;
+                        } else if arg.contains('\\') && arg.get(1..3) == Some(":\\") {
+                            // Pomiń ścieżki Windowsowe typu Z:\ (obsłużymy je przez maps)
+                            continue;
+                        } else {
+                            if let Ok(abs) = std::fs::canonicalize(arg) {
+                                win_exe_path = Some(abs);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Jeśli nie znaleziono w cmdline, sprawdź mapy pamięci (najbardziej niezawodne pod Wine)
+        if win_exe_path.is_none() {
+            if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+                for line in maps.lines() {
+                    if line.to_lowercase().contains(".exe") {
+                        // Ścieżka zaczyna się po 5-tym polu (po offset, dev, inode)
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 6 {
+                            // Połącz pozostałe części, bo ścieżka może mieć spacje
+                            let path_candidate = line.splitn(6, ' ').last().unwrap_or("").trim();
+                            if path_candidate.starts_with('/') && path_candidate.to_lowercase().ends_with(".exe") {
+                                win_exe_path = Some(PathBuf::from(path_candidate));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(exe_path) = win_exe_path {
+            if let Some(parent) = exe_path.parent() {
+                let p = parent.join("autohdr.conf");
+                eprintln!("[AutoHDR] Windows app detected. Target config: {:?}", p);
+                proc_config_path = Some(p);
+            }
+        }
+
+        // Jeśli nie znaleziono .exe (aplikacja natywna)
+        if proc_config_path.is_none() {
+            let exe_name = std::fs::read_to_string("/proc/self/comm")
+                .map(|s| s.trim().to_string())
+                .ok();
+            if let Some(name) = exe_name {
+                let p = config_dir.as_ref().map(|d| d.join(format!("{}.conf", name)));
+                eprintln!("[AutoHDR] Native app detected: {} | Config: {:?}", name, p);
+                proc_config_path = p;
             }
         }
 
@@ -209,8 +270,9 @@ impl HdrConfig {
             
             // Jeśli AUTOHDR_ENABLE=1 i nie ma pliku procesu, skopiuj autohdr.conf
             if std::env::var("AUTOHDR_ENABLE").ok() == Some("1".to_string()) && !proc_path.exists() {
-                if let Ok(_) = fs::copy(global_path, proc_path) {
-                    eprintln!("[AutoHDR] Created process-specific config by copying global config to {:?}", proc_path);
+                match fs::copy(global_path, proc_path) {
+                    Ok(_) => eprintln!("[AutoHDR] Created process-specific config by copying global config to {:?}", proc_path),
+                    Err(e) => eprintln!("[AutoHDR] Failed to create config at {:?}: {}", proc_path, e),
                 }
             }
         }
@@ -222,13 +284,13 @@ impl HdrConfig {
         if let Ok(path) = std::env::var("AUTOHDR_CONFIG") {
             selected_config_path = Some(PathBuf::from(path));
         }
-        // 2. [process].conf
+        // 2. [process].conf (lub autohdr.conf w folderze gry)
         if selected_config_path.is_none() {
             if let Some(ref path) = proc_config_path {
                 if path.exists() { selected_config_path = Some(path.clone()); }
             }
         }
-        // 3. autohdr.conf
+        // 3. autohdr.conf (globalny)
         if selected_config_path.is_none() {
             selected_config_path = global_config_path;
         }
