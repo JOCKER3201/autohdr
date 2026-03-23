@@ -19,7 +19,7 @@ layout(push_constant) uniform PushConstants {
     float rcas_strength;
     float fxaa_strength;
     float intensity;
-    float black_level;
+    float toe;
     float sdr_gain;
     uint  output_mode;
 } pc;
@@ -60,9 +60,13 @@ vec3 ReconstructHDR(vec3 sdr_rgb) {
     color = apply_vibrance(color, pc.vibrance);
     color = apply_saturation(color, pc.saturation);
     float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
+    
+    // Intelligent Toe for shadow contrast (toe > 0: more contrast/deeper blacks)
+    float luma_toe = pow(max(luma, 0.0), 1.0 + pc.toe);
+    
     float boost = pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance);
-    float target_luma = luma * pc.mid_luminance + (boost * pc.intensity);
-    return (luma > 0.0001) ? color * (target_luma / luma) : color * mix(luma * pc.mid_luminance, pc.mid_luminance, pc.intensity);
+    float target_luma = luma_toe * pc.mid_luminance + (boost * pc.intensity);
+    return (luma > 0.0001) ? color * (target_luma / luma) : color * mix(luma_toe * pc.mid_luminance, pc.mid_luminance, pc.intensity);
 }
 
 vec3 GetHDRLinear(vec2 uv) {

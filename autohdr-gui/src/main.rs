@@ -35,7 +35,7 @@ struct HdrConfig {
     pub sat: f32,
     pub vibrance: f32,
     pub intensity: f32,
-    pub black_level: f32,
+    pub toe: f32,
     pub rcas_strength: f32,
     pub fxaa_strength: f32,
     pub sdr_brightness: f32,
@@ -143,7 +143,7 @@ impl Default for HdrConfig {
             sat: 1.0,
             vibrance: 0.0,
             intensity: 1.0,
-            black_level: 0.0,
+            toe: 0.0,
             rcas_strength: 0.0,
             fxaa_strength: 0.0,
             sdr_brightness: 200.0,
@@ -174,7 +174,7 @@ fn build_ui(app: &gtk::Application) {
             sat: 1.0,
             vibrance: 0.0,
             intensity: 1.0,
-            black_level: 0.0,
+            toe: 0.0,
             rcas_strength: 0.0,
             fxaa_strength: 0.0,
             sdr_brightness: 200.0,
@@ -250,7 +250,7 @@ fn build_ui(app: &gtk::Application) {
     let s_sat = create_row(&grid, 2, "Saturation", 0.0, 2.0, 0.05, 1.0);
     let s_vib = create_row(&grid, 3, "Vibrance", 0.0, 2.0, 0.05, 0.0);
     let s_int = create_row(&grid, 4, "Intensity", 0.0, 10.0, 0.05, 1.0);
-    let s_black = create_row(&grid, 5, "Black Level", -1.0, 1.0, 0.05, 0.0);
+    let s_toe = create_row(&grid, 5, "Intelligent Toe", -1.0, 1.0, 0.05, 0.0);
     let s_rcas = create_row(&grid, 6, "RCAS Sharpening", 0.0, 1.0, 0.05, 0.0);
     let s_fxaa = create_row(&grid, 7, "FXAA Anti-Aliasing", 0.0, 1.0, 0.05, 0.0);
     let s_sdr = create_row(&grid, 8, "SDR Brightness (nits)", 50.0, 500.0, 10.0, 200.0);
@@ -311,7 +311,7 @@ fn build_ui(app: &gtk::Application) {
         let s_sat = s_sat.clone();
         let s_vib = s_vib.clone();
         let s_int = s_int.clone();
-        let s_black = s_black.clone();
+        let s_toe = s_toe.clone();
         let s_rcas = s_rcas.clone();
         let s_fxaa = s_fxaa.clone();
         let s_sdr = s_sdr.clone();
@@ -335,7 +335,7 @@ fn build_ui(app: &gtk::Application) {
                             s_sat.set_value(config.sat as f64);
                             s_vib.set_value(config.vibrance as f64);
                             s_int.set_value(config.intensity as f64);
-                            s_black.set_value(config.black_level as f64);
+                            s_toe.set_value(config.toe as f64);
                             s_rcas.set_value(config.rcas_strength as f64);
                             s_fxaa.set_value(config.fxaa_strength as f64);
                             s_sdr.set_value(config.sdr_brightness as f64);
@@ -357,7 +357,7 @@ fn build_ui(app: &gtk::Application) {
         let s_sat = s_sat.clone();
         let s_vib = s_vib.clone();
         let s_int = s_int.clone();
-        let s_black = s_black.clone();
+        let s_toe = s_toe.clone();
         let s_rcas = s_rcas.clone();
         let s_fxaa = s_fxaa.clone();
         let s_sdr = s_sdr.clone();
@@ -375,7 +375,7 @@ fn build_ui(app: &gtk::Application) {
                     ("sat", s_sat.value() as f32 as f64),
                     ("vibrance", s_vib.value() as f32 as f64),
                     ("intensity", s_int.value() as f32 as f64),
-                    ("black_level", s_black.value() as f32 as f64),
+                    ("toe", s_toe.value() as f32 as f64),
                     ("rcas_strength", s_rcas.value() as f32 as f64),
                     ("fxaa_strength", s_fxaa.value() as f32 as f64),
                     ("sdr_brightness", s_sdr.value() as f32 as f64),
@@ -383,7 +383,7 @@ fn build_ui(app: &gtk::Application) {
 
                 let ORDER = [
                     "max_lum", "mid_lum", "sat", "vibrance", "intensity", 
-                    "black_level", "rcas_strength", "fxaa_strength", 
+                    "toe", "rcas_strength", "fxaa_strength", 
                     "sdr_brightness", "preferred_format"
                 ];
 

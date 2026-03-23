@@ -44,7 +44,7 @@ Settings can be managed via a configuration file. The layer searches for configu
 | `AUTOHDR_INTENSITY` / `intensity` | Strength of the HDR transformation (0.0 to 1.0) | `1.0` |
 | `AUTOHDR_SATURATION` / `sat` | Global color saturation multiplier | `1.0` |
 | `AUTOHDR_VIBRANCE` / `vibrance` | Perceptual color enhancement (preserves skin tones) | `0.0` |
-| `AUTOHDR_BLACK_LEVEL` / `black_level` | Fine-tune shadow depth / black floor lift | `0.0` |
+| `AUTOHDR_TOE` / `toe` | Fine-tune shadow contrast (intelligent toe) | `0.0` |
 | `AUTOHDR_RCAS` / `rcas_strength` | AMD FidelityFX RCAS sharpening (0.0 to 1.0) | `0.0` |
 | `AUTOHDR_FXAA` / `fxaa_strength` | Fast Approximate Anti-Aliasing (0.0 to 1.0) | `0.0` |
 

@@ -66,7 +66,7 @@ struct HdrConfig {
     pub sat: f32,
     pub vibrance: f32,
     pub intensity: f32,
-    pub black_level: f32,
+    pub toe: f32,
     pub rcas_strength: f32,
     pub fxaa_strength: f32,
     pub sdr_brightness: f32,
@@ -89,7 +89,7 @@ impl Default for HdrConfig {
             sat: 1.0,
             vibrance: 0.0,
             intensity: 1.0,
-            black_level: 0.0,
+            toe: 0.0,
             rcas_strength: 0.0,
             fxaa_strength: 0.0,
             sdr_brightness: 200.0,
@@ -208,7 +208,7 @@ impl HdrConfig {
             sat: 1.0,
             vibrance: 0.0,
             intensity: 1.0,
-            black_level: 0.0,
+            toe: 0.0,
             rcas_strength: 0.0,
             fxaa_strength: 0.0,
             sdr_brightness: default_sdr_brightness,
@@ -329,7 +329,7 @@ impl HdrConfig {
         if let Some(v) = std::env::var("AUTOHDR_SATURATION").ok().and_then(|v| v.parse().ok()) { config.sat = v; }
         if let Some(v) = std::env::var("AUTOHDR_VIBRANCE").ok().and_then(|v| v.parse().ok()) { config.vibrance = v; }
         if let Some(v) = std::env::var("AUTOHDR_INTENSITY").ok().and_then(|v| v.parse().ok()) { config.intensity = v; }
-        if let Some(v) = std::env::var("AUTOHDR_BLACK_LEVEL").ok().and_then(|v| v.parse().ok()) { config.black_level = v; }
+        if let Some(v) = std::env::var("AUTOHDR_TOE").ok().and_then(|v| v.parse().ok()) { config.toe = v; }
         if let Some(v) = std::env::var("AUTOHDR_RCAS").ok().and_then(|v| v.parse().ok()) { config.rcas_strength = v; }
         if let Some(v) = std::env::var("AUTOHDR_FXAA").ok().and_then(|v| v.parse().ok()) { config.fxaa_strength = v; }
         if let Some(v) = std::env::var("AUTOHDR_SDR_BRIGHTNESS").ok().and_then(|v| v.parse().ok()) { config.sdr_brightness = v; }
@@ -344,8 +344,8 @@ impl HdrConfig {
         // Przeliczamy gain po nałożeniu wszystkich ustawień
         config.sdr_gain = config.sdr_brightness / 100.0;
 
-        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} SDR={} Format={:?}", 
-            monitor_name, config.max_lum, config.mid_lum, config.sat, config.vibrance, config.intensity, config.black_level, config.rcas_strength, config.fxaa_strength, config.sdr_brightness, config.preferred_format);
+        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={} Format={:?}", 
+            monitor_name, config.max_lum, config.mid_lum, config.sat, config.vibrance, config.intensity, config.toe, config.rcas_strength, config.fxaa_strength, config.sdr_brightness, config.preferred_format);
             
         config
     }
@@ -365,15 +365,15 @@ impl HdrConfig {
                                 self.sat = loaded.sat;
                                 self.vibrance = loaded.vibrance;
                                 self.intensity = loaded.intensity;
-                                self.black_level = loaded.black_level;
+                                self.toe = loaded.toe;
                                 self.rcas_strength = loaded.rcas_strength;
                                 self.fxaa_strength = loaded.fxaa_strength;
                                 self.sdr_brightness = loaded.sdr_brightness;
                                 self.sdr_gain = self.sdr_brightness / 100.0;
                                 self.preferred_format = loaded.preferred_format;
                                 self.last_mtime = Some(mtime);
-                                eprintln!("[AutoHDR] Config reloaded: Max={} Mid={} Sat={} Vib={} Int={} Black={} RCAS={} FXAA={} SDR={}", 
-                                    self.max_lum, self.mid_lum, self.sat, self.vibrance, self.intensity, self.black_level, self.rcas_strength, self.fxaa_strength, self.sdr_brightness);
+                                eprintln!("[AutoHDR] Config reloaded: Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={}", 
+                                    self.max_lum, self.mid_lum, self.sat, self.vibrance, self.intensity, self.toe, self.rcas_strength, self.fxaa_strength, self.sdr_brightness);
                             }
                         }
                     }
@@ -386,7 +386,7 @@ impl HdrConfig {
 #[repr(C)] #[derive(Clone, Copy)]
 struct PushConstants { 
     max_lum: f32, mid_lum: f32, sat: f32, vibrance: f32, width: u32, height: u32, 
-    rcas_strength: f32, fxaa_strength: f32, intensity: f32, black_level: f32, sdr_gain: f32, output_mode: u32 
+    rcas_strength: f32, fxaa_strength: f32, intensity: f32, toe: f32, sdr_gain: f32, output_mode: u32 
 }
 
 pub struct DeviceContext {
@@ -1002,11 +1002,10 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
                                 rcas_strength: config.rcas_strength,
                                 fxaa_strength: config.fxaa_strength,
                                 intensity: config.intensity,
-                                black_level: config.black_level,
+                                toe: config.toe,
                                 sdr_gain: config.sdr_gain,
-                                output_mode: config.preferred_format as u32,
-                            } as *const _ as *const _);
-                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
+                                output_mode: if config.preferred_format == OutputFormat::PQ { 0 } else { 1 },
+                                } as *const _ as *const _);                            (cd)(cb, (st.width + 15) / 16, (st.height + 15) / 16, 1);
                             (cpb)(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), 0, std::ptr::null(), 0, std::ptr::null(), 2, [vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::SHADER_WRITE, dst_access_mask: vk::AccessFlags::TRANSFER_READ, old_layout: vk::ImageLayout::GENERAL, new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.work_images[ii], subresource_range: sr }, vk::ImageMemoryBarrier { s_type: vk::StructureType::IMAGE_MEMORY_BARRIER, p_next: std::ptr::null(), src_access_mask: vk::AccessFlags::empty(), dst_access_mask: vk::AccessFlags::TRANSFER_WRITE, old_layout: vk::ImageLayout::UNDEFINED, new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL, src_queue_family_index: vk::QUEUE_FAMILY_IGNORED, dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED, image: st.real_images[ii], subresource_range: sr }].as_ptr());
                             let region = vk::ImageCopy { src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, src_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 }, dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 }, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 } };
                             (cci)(cb, st.work_images[ii], vk::ImageLayout::TRANSFER_SRC_OPTIMAL, st.real_images[ii], vk::ImageLayout::TRANSFER_DST_OPTIMAL, 1, &region);
