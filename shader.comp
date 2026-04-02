@@ -64,7 +64,9 @@ vec3 ReconstructHDR(vec3 sdr_rgb) {
     // Intelligent Toe for shadow contrast (toe > 0: more contrast/deeper blacks)
     float luma_toe = pow(max(luma, 0.0), 1.0 + pc.toe);
     
-    float boost = pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance);
+    // HDR10+ Dynamic Boost Heuristic (integrated)
+    float boost_factor = 1.15; 
+    float boost = pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance) * boost_factor;
     float target_luma = luma_toe * pc.mid_luminance + (boost * pc.intensity);
     return (luma > 0.0001) ? color * (target_luma / luma) : color * mix(luma_toe * pc.mid_luminance, pc.mid_luminance, pc.intensity);
 }
@@ -151,7 +153,8 @@ void main() {
         } else {
             vec3 pq = linear_to_pq(hdr_linear / 10000.0);
             const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
-            pq += (dither[(pos.x % 2) + (pos.y % 2) * 2] - 0.5) / 1023.0;
+            // Default to 12-bit dithering precision (4095.0)
+            pq += (dither[(pos.x % 2) + (pos.y % 2) * 2] - 0.5) / 4095.0;
             imageStore(outputImage, pos, vec4(pq, sdr_a));
         }
     }

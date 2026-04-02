@@ -424,7 +424,7 @@ pub struct DeviceContext {
 }
 
 pub struct SwapchainState {
-    pub width: u32, pub height: u32, pub sdr_format: vk::Format,
+    pub width: u32, pub height: u32, pub sdr_format: vk::Format, pub hdr_format: vk::Format,
     pub proxy_images: Vec<vk::Image>, pub proxy_mems: Vec<vk::DeviceMemory>, pub proxy_views: Vec<vk::ImageView>,
     pub work_images: Vec<vk::Image>, pub work_mems: Vec<vk::DeviceMemory>, pub work_views: Vec<vk::ImageView>,
     pub real_images: Vec<vk::Image>,
@@ -540,7 +540,8 @@ unsafe extern "system" fn hook_get_pd_surface_formats(pd: vk::PhysicalDevice, su
     SURFACE_NATIVE_HDR.write().unwrap().insert(surface, has_pq || has_scrgb);
     
     if !has_pq {
-        formats.push(vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT });
+        formats.insert(0, vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_UNORM, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT });
+        formats.insert(0, vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT });
     }
     if !has_scrgb {
         formats.push(vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT });
@@ -573,7 +574,8 @@ unsafe extern "system" fn hook_get_pd_surface_formats2(pd: vk::PhysicalDevice, p
     SURFACE_NATIVE_HDR.write().unwrap().insert((*p_info).surface, has_pq || has_scrgb);
 
     if !has_pq {
-        formats.push(vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT } });
+        formats.insert(0, vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_UNORM, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT } });
+        formats.insert(0, vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT } });
     }
     if !has_scrgb {
         formats.push(vk::SurfaceFormat2KHR { s_type: vk::StructureType::SURFACE_FORMAT_2_KHR, p_next: std::ptr::null_mut(), surface_format: vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT } });
@@ -787,8 +789,16 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
         }
         
         if requested_format == OutputFormat::PQ {
-            mi.image_format = vk::Format::A2B10G10R10_UNORM_PACK32;
-            mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            if formats.iter().any(|f| f.format == vk::Format::R16G16B16A16_UNORM && f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT) {
+                mi.image_format = vk::Format::R16G16B16A16_UNORM;
+                mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            } else if formats.iter().any(|f| f.format == vk::Format::R16G16B16A16_SFLOAT && f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT) {
+                mi.image_format = vk::Format::R16G16B16A16_SFLOAT;
+                mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            } else {
+                mi.image_format = vk::Format::A2B10G10R10_UNORM_PACK32;
+                mi.image_color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            }
         }
         mi.image_usage |= vk::ImageUsageFlags::TRANSFER_DST;
     }
@@ -802,13 +812,17 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
         }
     }
 
+    if res == vk::Result::SUCCESS && !bypass {
+        eprintln!("[AutoHDR] Swapchain created: Format={:?} ColorSpace={:?} Mode={}", mi.image_format, mi.image_color_space, output_mode);
+    }
+
     if res != vk::Result::SUCCESS {
         return res;
     }
 
     if bypass {
         SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { 
-            width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, 
+            width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, hdr_format: mi.image_format,
             proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), 
             work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), 
             real_images: Vec::new(), pipe: vk::Pipeline::null(), pipe_layout: vk::PipelineLayout::null(), 
@@ -833,7 +847,7 @@ unsafe extern "system" fn hook_create_swapchain_khr(dev: vk::Device, p_ci: *cons
             let dsm: vk::PFN_vkDestroyShaderModule = std::mem::transmute(f);
             (dsm)(dev, sm, std::ptr::null());
         }
-        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, output_mode });
+        SWAPCHAIN_STATES.write().unwrap().insert(*p_sc, SwapchainState { width: mi.image_extent.width, height: mi.image_extent.height, sdr_format, hdr_format: mi.image_format, proxy_images: Vec::new(), proxy_mems: Vec::new(), proxy_views: Vec::new(), work_images: Vec::new(), work_mems: Vec::new(), work_views: Vec::new(), real_images: Vec::new(), pipe, pipe_layout: pl, desc_layout: dsl, desc_pool: vk::DescriptorPool::null(), desc_sets: Vec::new(), cmd_pool: vk::CommandPool::null(), cmd_bufs: Vec::new(), sampler, present_semaphores: Vec::new(), bypass: false, output_mode });
     }
     res
 }
@@ -902,7 +916,11 @@ unsafe extern "system" fn hook_get_swapchain_images_khr(dev: vk::Device, sc: vk:
                 };
                 let pfn_gpdmp: vk::PFN_vkGetPhysicalDeviceMemoryProperties = std::mem::transmute(f_mp);
                 
-                let work_format = if st.output_mode == 1 { vk::Format::R16G16B16A16_SFLOAT } else { vk::Format::A2B10G10R10_UNORM_PACK32 };
+                let work_format = if st.output_mode == 1 { 
+                    vk::Format::R16G16B16A16_SFLOAT 
+                } else { 
+                    st.hdr_format
+                };
                 
                 for _ in 0..count {
                     let mut pi = vk::Image::null(); let _ = (ci)(dev, &vk::ImageCreateInfo { s_type: vk::StructureType::IMAGE_CREATE_INFO, p_next: std::ptr::null(), flags: vk::ImageCreateFlags::empty(), image_type: vk::ImageType::TYPE_2D, format: st.sdr_format, extent: vk::Extent3D { width: st.width, height: st.height, depth: 1 }, mip_levels: 1, array_layers: 1, samples: vk::SampleCountFlags::TYPE_1, tiling: vk::ImageTiling::OPTIMAL, usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC, sharing_mode: vk::SharingMode::EXCLUSIVE, queue_family_index_count: 0, p_queue_family_indices: std::ptr::null(), initial_layout: vk::ImageLayout::UNDEFINED }, std::ptr::null(), &mut pi);
