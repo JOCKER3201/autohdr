@@ -2,7 +2,7 @@
 use ash::vk;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
-use std::sync::RwLock;
+use std::sync::{RwLock, atomic::{AtomicU64, Ordering}};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use std::fs;
@@ -38,6 +38,7 @@ lazy_static::lazy_static! {
     static ref GLOBAL_INSTANCE: RwLock<Option<vk::Instance>> = RwLock::new(None);
     static ref HDR_CONFIG: RwLock<HdrConfig> = RwLock::new(HdrConfig::from_env());
 }
+static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Deserialize)] struct KScreenDoctorOutput { outputs: Vec<KScreenOutput> }
 #[derive(Deserialize)] struct KScreenOutput { 
@@ -77,8 +78,6 @@ struct HdrConfig {
     pub config_path: Option<PathBuf>,
     #[serde(skip)]
     pub last_mtime: Option<std::time::SystemTime>,
-    #[serde(skip)]
-    pub frame_counter: u64,
 }
 
 impl Default for HdrConfig {
@@ -97,11 +96,23 @@ impl Default for HdrConfig {
             preferred_format: OutputFormat::PQ,
             config_path: None,
             last_mtime: None,
-            frame_counter: 0,
         }
     }
 }
 impl HdrConfig {
+    fn validate(&mut self) {
+        self.max_lum = self.max_lum.clamp(100.0, 10000.0);
+        self.mid_lum = self.mid_lum.clamp(10.0, self.max_lum);
+        self.sat = self.sat.clamp(0.0, 3.0);
+        self.vibrance = self.vibrance.clamp(0.0, 3.0);
+        self.intensity = self.intensity.clamp(0.0, 10.0);
+        self.toe = self.toe.clamp(-1.0, 1.0);
+        self.rcas_strength = self.rcas_strength.clamp(0.0, 1.0);
+        self.fxaa_strength = self.fxaa_strength.clamp(0.0, 1.0);
+        self.sdr_brightness = self.sdr_brightness.clamp(10.0, 1000.0);
+        self.sdr_gain = self.sdr_brightness / 100.0;
+    }
+
     /// Attempts to read peak and average luminance from the monitor's EDID via sysfs.
     fn get_edid_luminance(connector: &str) -> (Option<f32>, Option<f32>) {
         let drm_dir = "/sys/class/drm";
@@ -124,16 +135,16 @@ impl HdrConfig {
                                     while i < d_start && i < 127 {
                                         let tag = (block[i] & 0xE0) >> 5;
                                         let len = (block[i] & 0x1F) as usize;
-                                        if tag == 0x07 && len >= 3 { // Extended Tag
+                                        if tag == 0x07 && len >= 3 && i + 1 < block.len() { // Extended Tag
                                             if block[i+1] == 0x06 { // HDR Static Metadata Block
                                                 let mut max_lum = None;
                                                 let mut avg_lum = None;
                                                 // CEA-861-G: Byte 6 (i+4) is Max Lum, Byte 7 (i+5) is Max Frame-avg
-                                                if len >= 4 {
-                                                    let v = block[i+4]; 
+                                                if len >= 4 && i + 4 < block.len() {
+                                                    let v = block[i+4];
                                                     if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
                                                 }
-                                                if len >= 5 {
+                                                if len >= 5 && i + 5 < block.len() {
                                                     let v = block[i+5];
                                                     if v > 0 { avg_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
                                                 }
@@ -216,7 +227,6 @@ impl HdrConfig {
             preferred_format: OutputFormat::PQ,
             config_path: None,
             last_mtime: None,
-            frame_counter: 0,
         };
 
         // 2. Wyznaczamy ścieżki
@@ -341,19 +351,15 @@ impl HdrConfig {
             };
         }
 
-        // Przeliczamy gain po nałożeniu wszystkich ustawień
-        config.sdr_gain = config.sdr_brightness / 100.0;
+        config.validate();
 
-        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={} Format={:?}", 
+        eprintln!("[AutoHDR] Monitor: {} | Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={} Format={:?}",
             monitor_name, config.max_lum, config.mid_lum, config.sat, config.vibrance, config.intensity, config.toe, config.rcas_strength, config.fxaa_strength, config.sdr_brightness, config.preferred_format);
-            
+
         config
     }
 
     fn reload_if_needed(&mut self) {
-        self.frame_counter += 1;
-        if self.frame_counter % 60 != 0 { return; } 
-
         if let Some(ref path) = self.config_path {
             if let Ok(metadata) = fs::metadata(path) {
                 if let Ok(mtime) = metadata.modified() {
@@ -369,10 +375,10 @@ impl HdrConfig {
                                 self.rcas_strength = loaded.rcas_strength;
                                 self.fxaa_strength = loaded.fxaa_strength;
                                 self.sdr_brightness = loaded.sdr_brightness;
-                                self.sdr_gain = self.sdr_brightness / 100.0;
                                 self.preferred_format = loaded.preferred_format;
+                                self.validate();
                                 self.last_mtime = Some(mtime);
-                                eprintln!("[AutoHDR] Config reloaded: Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={}", 
+                                eprintln!("[AutoHDR] Config reloaded: Max={} Mid={} Sat={} Vib={} Int={} Toe={} RCAS={} FXAA={} SDR={}",
                                     self.max_lum, self.mid_lum, self.sat, self.vibrance, self.intensity, self.toe, self.rcas_strength, self.fxaa_strength, self.sdr_brightness);
                             }
                         }
@@ -976,8 +982,12 @@ unsafe extern "system" fn hook_acquire_next_image_khr(dev: vk::Device, sc: vk::S
 }
 
 unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::PresentInfoKHR) -> vk::Result {
-    // Hot-reload config
-    HDR_CONFIG.write().unwrap().reload_if_needed();
+    // Hot-reload config: only take write lock every 60 frames, and only if file changed
+    if FRAME_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+        if let Ok(mut config) = HDR_CONFIG.write() {
+            config.reload_if_needed();
+        }
+    }
 
     let (dev, qfi) = QUEUE_TO_DEVICE.read().unwrap().get(&q).copied().unwrap_or((vk::Device::null(), 0));
     if dev != vk::Device::null() {
@@ -1057,12 +1067,13 @@ unsafe extern "system" fn hook_queue_present_khr(q: vk::Queue, p_pi: *const vk::
             }
             
             if let Some(ptr) = c.real_queue_present { return (ptr)(q, &new_present_info); }
-            else { 
+            else {
                 if let Some(f) = (c.gdpa)(dev, b"vkQueuePresentKHR\0".as_ptr() as *const c_char) {
                     return (std::mem::transmute::<_, vk::PFN_vkQueuePresentKHR>(f))(q, &new_present_info);
                 }
             }
         }
     }
-    vk::Result::SUCCESS
+    eprintln!("[AutoHDR] Error: queue {:?} not found in QUEUE_TO_DEVICE map, cannot present", q);
+    vk::Result::ERROR_DEVICE_LOST
 }

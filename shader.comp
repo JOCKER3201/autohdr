@@ -1,7 +1,14 @@
 #version 450
 
 /**
- * AutoHDR Compute Shader - Fixed RCAS Sharpening
+ * AutoHDR Compute Shader
+ *
+ * Inverse Tone Mapping based on the inverse extended Reinhard operator
+ * (Akyüz et al. 2007 / BT.2446-inspired) with:
+ *   - Proper highlight reconstruction (SDR white → display peak)
+ *   - Highlight desaturation (recovers clipped chroma)
+ *   - Parametric toe for shadow contrast control
+ *   - FXAA in SDR/perceptual space (Lottes), RCAS in HDR space
  */
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
@@ -59,37 +66,58 @@ vec3 ReconstructHDR(vec3 sdr_rgb) {
     color = Rec709_to_2020 * color;
     color = apply_vibrance(color, pc.vibrance);
     color = apply_saturation(color, pc.saturation);
-    float luma = dot(color, vec3(0.2627, 0.6780, 0.0593));
-    
-    // Intelligent Toe for shadow contrast (toe > 0: more contrast/deeper blacks)
-    float luma_toe = pow(max(luma, 0.0), 1.0 + pc.toe);
-    
-    // HDR10+ Dynamic Boost Heuristic (integrated)
-    float boost_factor = 1.15; 
-    float boost = pow(max(luma, 0.0), 3.0) * (pc.max_luminance - pc.mid_luminance) * boost_factor;
-    float target_luma = luma_toe * pc.mid_luminance + (boost * pc.intensity);
-    return (luma > 0.0001) ? color * (target_luma / luma) : color * mix(luma_toe * pc.mid_luminance, pc.mid_luminance, pc.intensity);
+
+    float Y = dot(color, vec3(0.2627, 0.6780, 0.0593));
+    if (Y < 0.0001) return vec3(0.0);
+
+    // Normalize luminance to SDR reference [0, 1]
+    float Y_n = clamp(Y / pc.sdr_gain, 0.0, 1.0);
+
+    // Toe: power curve for shadow contrast (mainly affects darks)
+    float Y_t = pow(Y_n, 1.0 + pc.toe);
+
+    // === Inverse Extended Reinhard ===
+    // Properties:
+    //   f(0) = 0
+    //   f(1) = Lmax  (SDR white maps to display peak)
+    //   f'(0) = Lmid  (shadows scale linearly by mid-luminance)
+    //   f is monotonically increasing and convex (proper expansion)
+    //
+    // Derivation: inverse of L_sdr = L_hdr * (Lmax/Lmid) / (L_hdr + Lmax)
+    float a = pc.max_luminance / pc.mid_luminance;
+    float Y_hdr = pc.max_luminance * Y_t / (a - (a - 1.0) * Y_t);
+
+    // Intensity blends between linear SDR mapping and full ITM expansion
+    Y_hdr = mix(Y_n * pc.mid_luminance, Y_hdr, pc.intensity);
+
+    // Scale color proportionally to preserve chrominance
+    vec3 result = color * (Y_hdr / Y);
+
+    // Highlight desaturation: SDR clipping destroys chroma information.
+    // Near SDR white, desaturate toward achromatic to avoid false color.
+    float max_c = max(color.r, max(color.g, color.b));
+    float desat = smoothstep(0.85 * pc.sdr_gain, pc.sdr_gain, max_c);
+    result = mix(result, vec3(Y_hdr), desat * 0.6);
+
+    return max(result, vec3(0.0));
 }
 
-vec3 GetHDRLinear(vec2 uv) {
-    return ReconstructHDR(texture(inputTexture, uv).rgb);
+// SDR perceptual luma for FXAA edge detection (matches original FXAA design)
+float GetSDRLuma(vec3 sdr_rgb) {
+    return dot(sdr_rgb, vec3(0.299, 0.587, 0.114));
 }
 
-float GetInternalLuma(vec3 linear_hdr) {
-    // Perceptual luma for edge detection
-    return sqrt(clamp(dot(linear_hdr, vec3(0.2627, 0.6780, 0.0593)) / 10000.0, 0.0, 1.0));
-}
-
+// FXAA in SDR space — texture fetches only, no HDR reconstruction per sample
 vec3 ApplyFXAA(vec2 uv) {
-    vec3 rgbM = GetHDRLinear(uv);
+    vec3 rgbM = texture(inputTexture, uv).rgb;
     if (pc.fxaa_strength <= 0.0) return rgbM;
 
     vec2 res = 1.0 / vec2(pc.width, pc.height);
-    float lumaM  = GetInternalLuma(rgbM);
-    float lumaNW = GetInternalLuma(GetHDRLinear(uv + vec2(-1.0, -1.0) * res));
-    float lumaNE = GetInternalLuma(GetHDRLinear(uv + vec2(1.0, -1.0) * res));
-    float lumaSW = GetInternalLuma(GetHDRLinear(uv + vec2(-1.0, 1.0) * res));
-    float lumaSE = GetInternalLuma(GetHDRLinear(uv + vec2(1.0, 1.0) * res));
+    float lumaM  = GetSDRLuma(rgbM);
+    float lumaNW = GetSDRLuma(texture(inputTexture, uv + vec2(-1.0, -1.0) * res).rgb);
+    float lumaNE = GetSDRLuma(texture(inputTexture, uv + vec2(1.0, -1.0) * res).rgb);
+    float lumaSW = GetSDRLuma(texture(inputTexture, uv + vec2(-1.0, 1.0) * res).rgb);
+    float lumaSE = GetSDRLuma(texture(inputTexture, uv + vec2(1.0, 1.0) * res).rgb);
 
     float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
     float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
@@ -99,21 +127,30 @@ vec3 ApplyFXAA(vec2 uv) {
     float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
     dir = min(vec2(8.0), max(vec2(-8.0), dir * rcpDirMin)) * res;
 
-    vec3 rgbA = 0.5 * (GetHDRLinear(uv + dir * (1.0/3.0 - 0.5)) + GetHDRLinear(uv + dir * (2.0/3.0 - 0.5)));
-    vec3 rgbB = rgbA * 0.5 + 0.25 * (GetHDRLinear(uv + dir * (0.0/3.0 - 0.5)) + GetHDRLinear(uv + dir * (3.0/3.0 - 0.5)));
+    vec3 rgbA = 0.5 * (texture(inputTexture, uv + dir * (1.0/3.0 - 0.5)).rgb + texture(inputTexture, uv + dir * (2.0/3.0 - 0.5)).rgb);
+    vec3 rgbB = rgbA * 0.5 + 0.25 * (texture(inputTexture, uv + dir * (0.0/3.0 - 0.5)).rgb + texture(inputTexture, uv + dir * (3.0/3.0 - 0.5)).rgb);
 
-    return (GetInternalLuma(rgbB) < lumaMin || GetInternalLuma(rgbB) > lumaMax) ? mix(rgbM, rgbA, pc.fxaa_strength) : mix(rgbM, rgbB, pc.fxaa_strength);
+    return (GetSDRLuma(rgbB) < lumaMin || GetSDRLuma(rgbB) > lumaMax) ? mix(rgbM, rgbA, pc.fxaa_strength) : mix(rgbM, rgbB, pc.fxaa_strength);
+}
+
+// HDR reconstruction applied once after FXAA (was 9-45x before)
+vec3 GetHDRLinear(vec2 uv) {
+    return ReconstructHDR(ApplyFXAA(uv));
+}
+
+float GetInternalLuma(vec3 linear_hdr) {
+    return sqrt(clamp(dot(linear_hdr, vec3(0.2627, 0.6780, 0.0593)) / 10000.0, 0.0, 1.0));
 }
 
 vec3 FsrRcasF(vec2 uv) {
-    vec3 e = ApplyFXAA(uv);
+    vec3 e = GetHDRLinear(uv);
     if (pc.rcas_strength <= 0.0) return e;
 
     vec2 off = 1.0 / vec2(pc.width, pc.height);
-    vec3 b = ApplyFXAA(uv + vec2(0, -off.y));
-    vec3 d = ApplyFXAA(uv + vec2(-off.x, 0));
-    vec3 f = ApplyFXAA(uv + vec2(off.x, 0));
-    vec3 h = ApplyFXAA(uv + vec2(0, off.y));
+    vec3 b = GetHDRLinear(uv + vec2(0, -off.y));
+    vec3 d = GetHDRLinear(uv + vec2(-off.x, 0));
+    vec3 f = GetHDRLinear(uv + vec2(off.x, 0));
+    vec3 h = GetHDRLinear(uv + vec2(0, off.y));
 
     float bL = GetInternalLuma(b);
     float dL = GetInternalLuma(d);
@@ -124,15 +161,11 @@ vec3 FsrRcasF(vec2 uv) {
     float mnL = min(min(bL, dL), min(min(fL, hL), eL));
     float mxL = max(max(bL, dL), max(max(fL, hL), eL));
 
-    // High-performance RCAS sharpening weight (negative for sharpening)
-    // Range: -0.125 (max sharp) to -0.05 (subtle)
     float peak = -1.0 / mix(20.0, 8.0, clamp(pc.rcas_strength, 0.0, 1.0));
-    
-    // Ringing suppression
+
     float ampL = clamp(min(mnL, 1.0 - mxL) / mxL, 0.0, 1.0);
     float wL = peak * sqrt(ampL);
 
-    // Final convolution: (1 + 4*wL)*e + wL*(b + d + f + h)
     return (e + wL * (b + d + f + h)) / (1.0 + 4.0 * wL);
 }
 
@@ -143,7 +176,7 @@ void main() {
         ivec2 pos = tile_origin + ivec2(idx % 16, (idx / 16) * 8 + i);
         if (pos.x >= pc.width || pos.y >= pc.height) continue;
         vec2 uv = (vec2(pos) + 0.5) / vec2(pc.width, pc.height);
-        
+
         vec3 hdr_linear = FsrRcasF(uv);
         float sdr_a = texture(inputTexture, uv).a;
 
@@ -153,7 +186,6 @@ void main() {
         } else {
             vec3 pq = linear_to_pq(hdr_linear / 10000.0);
             const float dither[4] = float[](0.0, 0.5, 0.25, 0.75);
-            // Default to 16-bit dithering precision (65535.0) for maximum smoothness
             pq += (dither[(pos.x % 2) + (pos.y % 2) * 2] - 0.5) / 65535.0;
             imageStore(outputImage, pos, vec4(pq, sdr_a));
         }

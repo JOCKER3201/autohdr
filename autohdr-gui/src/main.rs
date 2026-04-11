@@ -63,15 +63,15 @@ impl HdrConfig {
                                     while i < d_start && i < 127 {
                                         let tag = (block[i] & 0xE0) >> 5;
                                         let len = (block[i] & 0x1F) as usize;
-                                        if tag == 0x07 && len >= 3 {
+                                        if tag == 0x07 && len >= 3 && i + 1 < block.len() {
                                             if block[i+1] == 0x06 {
                                                 let mut max_lum = None;
                                                 let mut avg_lum = None;
-                                                if len >= 4 {
-                                                    let v = block[i+4]; 
+                                                if len >= 4 && i + 4 < block.len() {
+                                                    let v = block[i+4];
                                                     if v > 0 { max_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
                                                 }
-                                                if len >= 5 {
+                                                if len >= 5 && i + 5 < block.len() {
                                                     let v = block[i+5];
                                                     if v > 0 { avg_lum = Some(50.0 * (v as f32 / 32.0).exp2()); }
                                                 }
@@ -167,19 +167,9 @@ fn main() -> gtk::glib::ExitCode {
 }
 
 fn build_ui(app: &gtk::Application) {
+    let default_config = HdrConfig::default();
     let state = Rc::new(RefCell::new(AppState {
-        current_config: HdrConfig {
-            max_lum: 1000.0,
-            mid_lum: 300.0,
-            sat: 1.0,
-            vibrance: 0.0,
-            intensity: 1.0,
-            toe: 0.0,
-            rcas_strength: 0.0,
-            fxaa_strength: 0.0,
-            sdr_brightness: 200.0,
-            preferred_format: OutputFormat::PQ,
-        },
+        current_config: default_config,
         current_file: None,
     }));
 
@@ -245,15 +235,16 @@ fn build_ui(app: &gtk::Application) {
         scale
     }
 
-    let s_max_lum = create_row(&grid, 0, "Max Luminance (nits)", 100.0, 2000.0, 10.0, 1000.0);
-    let s_mid_lum = create_row(&grid, 1, "Mid Luminance (nits)", 10.0, 1000.0, 5.0, 300.0);
-    let s_sat = create_row(&grid, 2, "Saturation", 0.0, 2.0, 0.05, 1.0);
-    let s_vib = create_row(&grid, 3, "Vibrance", 0.0, 2.0, 0.05, 0.0);
-    let s_int = create_row(&grid, 4, "Intensity", 0.0, 10.0, 0.05, 1.0);
-    let s_toe = create_row(&grid, 5, "Intelligent Toe", -1.0, 1.0, 0.05, 0.0);
-    let s_rcas = create_row(&grid, 6, "RCAS Sharpening", 0.0, 1.0, 0.05, 0.0);
-    let s_fxaa = create_row(&grid, 7, "FXAA Anti-Aliasing", 0.0, 1.0, 0.05, 0.0);
-    let s_sdr = create_row(&grid, 8, "SDR Brightness (nits)", 50.0, 500.0, 10.0, 200.0);
+    let init = state.borrow().current_config.clone();
+    let s_max_lum = create_row(&grid, 0, "Max Luminance (nits)", 100.0, 2000.0, 10.0, init.max_lum as f64);
+    let s_mid_lum = create_row(&grid, 1, "Mid Luminance (nits)", 10.0, 1000.0, 5.0, init.mid_lum as f64);
+    let s_sat = create_row(&grid, 2, "Saturation", 0.0, 2.0, 0.05, init.sat as f64);
+    let s_vib = create_row(&grid, 3, "Vibrance", 0.0, 2.0, 0.05, init.vibrance as f64);
+    let s_int = create_row(&grid, 4, "Intensity", 0.0, 10.0, 0.05, init.intensity as f64);
+    let s_toe = create_row(&grid, 5, "Intelligent Toe", -1.0, 1.0, 0.05, init.toe as f64);
+    let s_rcas = create_row(&grid, 6, "RCAS Sharpening", 0.0, 1.0, 0.05, init.rcas_strength as f64);
+    let s_fxaa = create_row(&grid, 7, "FXAA Anti-Aliasing", 0.0, 1.0, 0.05, init.fxaa_strength as f64);
+    let s_sdr = create_row(&grid, 8, "SDR Brightness (nits)", 50.0, 500.0, 10.0, init.sdr_brightness as f64);
 
     let format_label = gtk::Label::new(Some("Output Format"));
     format_label.set_halign(gtk::Align::Start);
@@ -381,7 +372,7 @@ fn build_ui(app: &gtk::Application) {
                     ("sdr_brightness", s_sdr.value() as f32 as f64),
                 ];
 
-                let ORDER = [
+                let order = [
                     "max_lum", "mid_lum", "sat", "vibrance", "intensity", 
                     "toe", "rcas_strength", "fxaa_strength", 
                     "sdr_brightness", "preferred_format"
@@ -394,8 +385,8 @@ fn build_ui(app: &gtk::Application) {
 
                 // Ensure order for newly added keys
                 let root = doc.as_table_mut();
-                for i in 0..ORDER.len() {
-                    let key = ORDER[i];
+                for i in 0..order.len() {
+                    let key = order[i];
                     if root.contains_key(key) {
                         // If it's already there, we might want to move it to maintain relative order 
                         // only if it was JUST added (but toml_edit keeps existing ones).
@@ -410,7 +401,7 @@ fn build_ui(app: &gtk::Application) {
                 // if we want elements to appear in order, we should insert them in order if missing.
                 
                 let mut final_doc = toml_edit::DocumentMut::new();
-                for key in ORDER {
+                for key in order {
                     if let Some(v) = root.remove(key) {
                         final_doc[key] = v;
                     }
